@@ -308,3 +308,80 @@ pub fn self_test() {
         page.set(n + 1);
     });
 }
+
+/// `--memory-test`: abre e fecha o popup; abre e fecha as configurações 5 vezes passando
+/// por todas as páginas; faz 5 capturas de tela (sem janela, ver shot::memory_probe), cada
+/// uma seguida do popup com a prévia da imagem. Mede a memória a cada ciclo: crescer a
+/// cada ciclo seria vazamento; subir uma vez e estabilizar é cache ou heap não devolvido.
+pub fn memory_test(ui: &crate::AppWindow) {
+    TESTING.with(|t| t.set(true));
+    let ui = ui.as_weak();
+    let tick = Cell::new(0u32);
+    let closed: RefCell<Option<slint::Weak<SettingsWindow>>> = RefCell::new(None);
+    let report = |what: &str| {
+        let (private, working) = win::memory_mb();
+        println!("[memória] {what}: {private:.1} MB privados · {working:.1} MB working set");
+    };
+    let timer = Box::leak(Box::new(slint::Timer::default()));
+    timer.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || {
+        let Some(ui) = ui.upgrade() else { return };
+        let n = tick.get();
+        tick.set(n + 1);
+        match n {
+            0 => crate::toggle(&ui, Instant::now(), win::Target::default()),
+            1 => {
+                crate::hide(&ui);
+                report("popup aberto e fechado");
+            }
+            _ if n < 2 + 5 * 8 => {
+                let (cycle, step) = ((n - 2) / 8 + 1, (n - 2) % 8);
+                match step {
+                    0 => {
+                        open();
+                        if let Some(w) = current() {
+                            w.window().set_position(slint::PhysicalPosition::new(-32000, -32000));
+                        }
+                    }
+                    1..=5 => {
+                        if let Some(w) = current() {
+                            w.set_page(step as i32 - 1);
+                            let _ = w.window().take_snapshot();
+                        }
+                        if step == 5 {
+                            report(&format!("configurações abertas ({cycle}ª vez)"));
+                        }
+                    }
+                    6 => {
+                        if let Some(w) = current() {
+                            let _ = w.hide();
+                            *closed.borrow_mut() = Some(w.as_weak());
+                        }
+                        WINDOW.with(|slot| slot.borrow_mut().take());
+                    }
+                    _ => {
+                        let freed = closed.borrow().as_ref().is_some_and(|w| w.upgrade().is_none());
+                        report(&format!("configurações fechadas ({cycle}ª vez, janela liberada: {})", if freed { "sim" } else { "não" }));
+                    }
+                }
+            }
+            _ if n < 42 + 5 * 3 => {
+                let (cycle, step) = ((n - 42) / 3 + 1, (n - 42) % 3);
+                match step {
+                    // Thread própria, como a captura de verdade.
+                    0 => match std::thread::spawn(crate::shot::memory_probe).join().ok().flatten() {
+                        Some(dib) => crate::store_image(dib, None, "captura".into()),
+                        None => eprintln!("[memória] a captura de teste falhou"),
+                    },
+                    1 => crate::toggle(&ui, Instant::now(), win::Target::default()),
+                    _ => {
+                        crate::hide(&ui);
+                        report(&format!("captura + popup com a prévia ({cycle}ª vez)"));
+                    }
+                }
+            }
+            _ => {
+                let _ = slint::quit_event_loop();
+            }
+        }
+    });
+}

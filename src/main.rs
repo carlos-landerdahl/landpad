@@ -100,9 +100,11 @@ fn main() -> Result<(), slint::PlatformError> {
         shot::self_test();
         return Ok(());
     }
-    // Os modos de teste rodam ao lado do app de verdade.
-    let testing = flag("--bench") || flag("--settings-test");
-    if !testing && !win::first_instance() {
+    // Os modos de teste rodam ao lado do app de verdade, com uma pasta de imagens só deles.
+    let testing = flag("--bench") || flag("--settings-test") || flag("--memory-test");
+    if testing {
+        images::use_test_dir();
+    } else if !win::first_instance() {
         eprintln!("O Landpad já está aberto: procure o ícone na bandeja.");
         return Ok(());
     }
@@ -320,6 +322,10 @@ fn main() -> Result<(), slint::PlatformError> {
     }
     if flag("--settings-test") {
         settings::self_test();
+    }
+    if flag("--memory-test") {
+        BENCH.with(|c| c.set(true));
+        settings::memory_test(&ui);
     }
 
     let result = slint::run_event_loop_until_quit();

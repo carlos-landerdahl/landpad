@@ -7,15 +7,25 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 const FILE_HEADER: usize = 14;
+
+static TESTING: AtomicBool = AtomicBool::new(false);
+
+/// Os modos de teste rodam ao lado do app de verdade e apagam a própria pasta ao abrir
+/// e ao fechar: precisam de uma pasta só deles. Chamar antes de qualquer outra função.
+pub fn use_test_dir() {
+    TESTING.store(true, Ordering::Release);
+}
 
 pub fn dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
         let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        base.join("Landpad").join("imagens")
+        let name = if TESTING.load(Ordering::Acquire) { "imagens-teste" } else { "imagens" };
+        base.join("Landpad").join(name)
     })
 }
 

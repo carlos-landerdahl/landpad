@@ -999,6 +999,33 @@ pub fn self_test() {
     }
 }
 
+/// Para o `--memory-test`: o caminho da captura inteiro (GDI+, as três cópias da tela,
+/// recorte com anotações e o DIB final) sobre uma área de trabalho de mentira do tamanho
+/// da tela de verdade. Não abre janela nem lê o que está na tela.
+pub fn memory_probe() -> Option<Vec<u8>> {
+    unsafe {
+        let (w, h) = (GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+        let _gdiplus = GdiPlus::start()?;
+        let mut desk = Surface::new(w, h)?;
+        fake_desktop(&mut desk);
+        let mut o = Overlay::new(desk, None)?;
+        let p = |x, y| POINT { x, y };
+        let sel = RECT { left: 200, top: 120, right: 1000.min(w), bottom: 640.min(h) };
+        o.sel = Some(sel);
+        o.shapes = vec![
+            Shape::Blur { from: p(260, 300), to: p(600, 360) },
+            Shape::Rect { from: p(250, 180), to: p(560, 240), color: 0 },
+            Shape::Arrow { from: p(760, 420), to: p(580, 220), color: 0 },
+            Shape::Marker { points: vec![p(260, 440), p(700, 442)], color: 1 },
+        ];
+        o.back = Surface::new(w, h);
+        if let Some(back) = &o.back {
+            o.paint(back.dc);
+        }
+        Some(o.render(sel)?.to_dib())
+    }
+}
+
 /// Um fundo em degradê com uma "janela" clara e linhas de texto, para o teste ter o que mostrar.
 fn fake_desktop(s: &mut Surface) {
     let (w, h) = (s.width, s.height);

@@ -42,6 +42,22 @@ O executável não abre janela de console. Aberto de um terminal, ele usa o cons
 
 Para conferir a tela sem clicar em nada, `cargo run --release -- --settings-test` abre as configurações fora da tela, fotografa cada página em `target/settings-N.bmp` e fecha.
 
+Os modos de teste (`--bench`, `--settings-test`, `--memory-test`) podem rodar com o Landpad aberto: usam uma pasta de imagens própria (`imagens-teste`) e não disputam atalhos nem a bandeja.
+
+## Memória com tudo ligado (31/10/2026)
+
+`cargo run --release -- --memory-test` abre e fecha o popup, abre e fecha as configurações 5 vezes passando por todas as páginas e faz 5 capturas de tela (o caminho inteiro, sem janela e sobre uma área de trabalho de mentira do tamanho da tela), cada uma seguida do popup com a prévia da imagem.
+
+| Situação | Memória privada |
+|---|---|
+| Parado | 6,0 MB |
+| Depois do popup | 7,7 MB |
+| Configurações abertas | 10,3 MB, igual nas 5 vezes |
+| Configurações fechadas | 8,5 MB, igual nas 5 vezes |
+| Depois das 5 capturas | 9,1 MB, igual nas 5 vezes |
+
+Não há vazamento: cada coisa custa uma vez (fontes, glifos e estilos que o Slint guarda) e o número não cresce com o uso. Durante uma captura o app usa mais (três cópias da tela, cerca de 50 MB com dois monitores Full HD), e devolve tudo ao fechar.
+
 ## Rodar
 
 ```bash
