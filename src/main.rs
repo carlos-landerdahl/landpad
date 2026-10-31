@@ -7,6 +7,7 @@
 #![windows_subsystem = "windows"]
 
 mod assets;
+mod color;
 mod config;
 mod images;
 mod logo;
@@ -134,7 +135,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let model = Rc::new(VecModel::<ClipRow>::default());
     ui.set_rows(ModelRc::from(model.clone()));
     win::set_capture_rules(false, config.keep_images, &config.ignored_apps);
-    let (popup_key, shot_key) = (config.popup_hotkey, config.shot_hotkey);
+    let hotkey_set = (config.popup_hotkey, config.shot_hotkey, config.color_hotkey);
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             ui: ui.as_weak(),
@@ -278,6 +279,7 @@ fn main() -> Result<(), slint::PlatformError> {
             });
         }),
         on_shot: Box::new(start_shot),
+        on_color: Box::new(start_color),
         on_tray: Box::new(move |command| {
             let weak = on_tray.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -290,6 +292,7 @@ fn main() -> Result<(), slint::PlatformError> {
                         }
                     }
                     win::TrayCommand::Shot => start_shot(),
+                    win::TrayCommand::Color => start_color(),
                     win::TrayCommand::Pause => {
                         with_state(|st| {
                             st.paused = !st.paused;
@@ -323,7 +326,7 @@ fn main() -> Result<(), slint::PlatformError> {
         }),
     };
     let options = win::Options { tray: !testing, hotkeys: !testing };
-    match win::start(handlers, options, popup_key, shot_key) {
+    match win::start(handlers, options, hotkey_set) {
         Ok(keys) => {
             with_state(|st| st.hotkeys = keys);
             report_hotkeys(keys);
@@ -384,7 +387,23 @@ fn welcome(keys: win::Hotkeys) {
 }
 
 fn start_shot() {
-    shot::open(|dib| store_image(dib, None, "captura".into()));
+    open_capture(shot::Mode::Shot);
+}
+
+fn start_color() {
+    open_capture(shot::Mode::Color);
+}
+
+/// Captura e conta-gotas abrem a mesma tela congelada; na captura, C troca para o
+/// conta-gotas. O que sair dali entra no histórico.
+fn open_capture(mode: shot::Mode) {
+    shot::open(
+        mode,
+        |dib| store_image(dib, None, "captura".into()),
+        |color| {
+            let _ = slint::invoke_from_event_loop(move || add_clip(Content::Text(color), "cor".into()));
+        },
+    );
 }
 
 fn report_hotkeys(keys: win::Hotkeys) {
@@ -393,9 +412,10 @@ fn report_hotkeys(keys: win::Hotkeys) {
         None => format!("sem atalho para {what}"),
     };
     println!(
-        "Landpad rodando. {}, {}; o ícone na bandeja tem o resto.",
+        "Landpad rodando. {}, {}, {}; o ícone na bandeja tem o resto.",
         label(keys.popup, "abre o histórico", "o histórico"),
-        label(keys.shot, "captura a tela", "a captura")
+        label(keys.shot, "captura a tela", "a captura"),
+        label(keys.color, "pega uma cor", "o conta-gotas")
     );
 }
 
@@ -489,6 +509,9 @@ fn start_bench(ui: &AppWindow) {
         };
         add_clip(Content::Text(text), "bench".into());
     }
+    // Cores aparecem com a bolinha da cor no lugar do ícone.
+    add_clip(Content::Text("rgb(46, 205, 180)".into()), "cor".into());
+    add_clip(Content::Text("#2E63FF".into()), "cor".into());
     with_state(|st| {
         for k in [7, 2] {
             st.pin_seq += 1;
@@ -720,11 +743,16 @@ fn refresh(st: &mut State) {
                 Content::Text(text) => (preview(text), kind_of(text), slint::Image::default()),
                 Content::Image(p) => (image_label(p), "image", p.thumb.clone()),
             };
+            let swatch = match &clip.content {
+                Content::Text(text) => color::parse(text).map(|(r, g, b)| slint::Color::from_rgb_u8(r, g, b)),
+                Content::Image(_) => None,
+            };
             ClipRow {
                 text: text.into(),
                 meta: format!("{} · {}", clip.app, ago(now.duration_since(clip.copied))).into(),
                 kind: kind.into(),
                 thumb,
+                swatch: swatch.unwrap_or_default(),
                 pinned: clip.pinned.is_some(),
             }
         })
@@ -856,7 +884,9 @@ fn preview(text: &str) -> String {
 
 fn kind_of(text: &str) -> &'static str {
     let t = text.trim();
-    if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
+    if color::parse(t).is_some() {
+        "color"
+    } else if (t.starts_with("http://") || t.starts_with("https://")) && !t.contains(char::is_whitespace) {
         "link"
     } else if t.contains('\n') && (t.contains('{') || t.contains(';') || t.contains("    ")) {
         "code"

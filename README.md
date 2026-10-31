@@ -4,7 +4,7 @@
 
 <p align="center">Histórico da área de transferência e captura de tela para Windows, leve e rápido.</p>
 
-O Landpad guarda o que você copia, texto e imagens, acha qualquer coisa pela busca e cola de volta em qualquer app. No `PrtSc`, congela a tela para você recortar, anotar e copiar, no estilo do Lightshot.
+O Landpad guarda o que você copia, texto e imagens, acha qualquer coisa pela busca e cola de volta em qualquer app. No `PrtSc`, congela a tela para você recortar, anotar e copiar, no estilo do Lightshot, e tem um conta-gotas para pegar qualquer cor da tela.
 
 - **Leve:** cerca de 8 MB de memória e o histórico abre em ~12 ms.
 - **Um app só:** um executável, sem serviços, sem conta e sem nuvem.
@@ -28,10 +28,13 @@ O Landpad instalado se atualiza sozinho. Uma vez por dia ele pergunta ao GitHub 
 |---|---|
 | `` Ctrl+` `` | Abre o histórico perto do cursor de texto |
 | `PrtSc` | Captura de tela |
+| `Win+Shift+C` | Conta-gotas: pega uma cor da tela (se o Windows já usar esse atalho, vale `Ctrl+Shift+PrtSc`) |
 
 **No histórico:** digite para buscar (acentos não importam), use ↑ ↓ e `Enter` para colar no app em que você estava. `Ctrl+P` fixa um item no topo e `Tab` mostra só os fixados. `Ctrl+Shift+1` a `9` colam direto pelo número. `Esc` fecha, e `Ctrl+,` abre as configurações.
 
 **Na captura:** arraste para selecionar. Na barra embaixo da seleção ficam seta (`A`), retângulo (`R`), marca-texto (`M`) e borrar (`B`), que pixela dados que não devem aparecer; o círculo troca a cor e `Ctrl+Z` desfaz. `Enter` copia, `Ctrl+S` também salva um PNG em `Imagens\Landpad`, e `Esc` cancela. Toda captura entra no histórico.
+
+**No conta-gotas:** uma lupa mostra os pixels em volta do cursor e o código da cor. Clique copia em HEX (`#2E63FF`), `Shift`+clique copia em RGB (`rgb(46, 99, 255)`), as setas andam 1 pixel e `Esc` cancela. Na captura, a tecla `C` troca para o conta-gotas. Cores copiadas aparecem no histórico com uma bolinha da cor.
 
 **Na bandeja:** um clique abre o histórico. O botão direito tem captura de tela, pausar a captura, configurações e sair.
 

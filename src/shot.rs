@@ -49,20 +49,33 @@ const PANEL_HOVER: (u8, u8, u8) = (0x3A, 0x3A, 0x3A);
 const PANEL_TEXT: (u8, u8, u8) = (0xF0, 0xF0, 0xF0);
 
 type OnDone = Box<dyn FnOnce(Vec<u8>) + Send>;
+type OnColor = Box<dyn FnOnce(String) + Send>;
+
+/// Recortar uma região (PrtSc) ou pegar uma cor da tela (conta-gotas). Os dois congelam
+/// a tela do mesmo jeito; na captura, a tecla C troca para o conta-gotas.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    Shot,
+    Color,
+}
+
+/// O conta-gotas mostra 13 × 13 pixels em volta do cursor, ampliados.
+const LOUPE_CELLS: i32 = 13;
 
 thread_local! {
     static OVERLAY: RefCell<Option<Overlay>> = const { RefCell::new(None) };
     static CLOSING: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Abre a captura numa thread própria; ignora o atalho se já houver uma aberta.
-/// `on_done` recebe a imagem final como DIB, já copiada para o clipboard.
-pub fn open(on_done: impl FnOnce(Vec<u8>) + Send + 'static) {
+/// Abre a captura ou o conta-gotas numa thread própria; ignora o atalho se já houver um
+/// aberto. `on_image` recebe a imagem recortada como DIB e `on_color` a cor em texto, as
+/// duas já copiadas para o clipboard.
+pub fn open(mode: Mode, on_image: impl FnOnce(Vec<u8>) + Send + 'static, on_color: impl FnOnce(String) + Send + 'static) {
     if ACTIVE.swap(true, Ordering::AcqRel) {
         return;
     }
     let spawned = std::thread::Builder::new().name("landpad-shot".into()).spawn(move || {
-        unsafe { run(Box::new(on_done)) };
+        unsafe { run(mode, Box::new(on_image), Box::new(on_color)) };
         ACTIVE.store(false, Ordering::Release);
     });
     if spawned.is_err() {
@@ -70,7 +83,7 @@ pub fn open(on_done: impl FnOnce(Vec<u8>) + Send + 'static) {
     }
 }
 
-unsafe fn run(on_done: OnDone) {
+unsafe fn run(mode: Mode, on_done: OnDone, on_color: OnColor) {
     // Coordenadas em pixels físicos em todos os monitores, mesmo com escalas diferentes.
     let _ = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     let t0 = Instant::now();
@@ -89,6 +102,11 @@ unsafe fn run(on_done: OnDone) {
         return;
     };
     overlay.hwnd = hwnd;
+    overlay.origin = origin;
+    overlay.on_color = Some(on_color);
+    if mode == Mode::Color {
+        overlay.start_color();
+    }
     OVERLAY.with(|o| *o.borrow_mut() = Some(overlay));
     let _ = ShowWindow(hwnd, SW_SHOW);
     let _ = SetForegroundWindow(hwnd);
@@ -244,6 +262,9 @@ enum Finish {
     Cancel,
     Copy,
     Save,
+    /// Conta-gotas: copia a cor do pixel sob o cursor.
+    PickHex,
+    PickRgb,
 }
 
 struct Overlay {
@@ -264,6 +285,12 @@ struct Overlay {
     text_font: HFONT,
     icon_font: HFONT,
     on_done: Option<OnDone>,
+    on_color: Option<OnColor>,
+    mode: Mode,
+    /// Canto da área de trabalho virtual, para converter coordenadas da janela em da tela.
+    origin: POINT,
+    /// Pixel sob o cursor, no conta-gotas.
+    cursor: POINT,
 }
 
 impl Drop for Overlay {
@@ -301,6 +328,10 @@ impl Overlay {
             text_font: font((12.0 * scale) as i32, 600, w!("Segoe UI Variable Text")),
             icon_font: font((16.0 * scale) as i32, 400, w!("Segoe Fluent Icons")),
             on_done,
+            on_color: None,
+            mode: Mode::Shot,
+            origin: POINT::default(),
+            cursor: POINT::default(),
         })
     }
 
@@ -373,6 +404,10 @@ impl Overlay {
     }
 
     fn mouse_down(&mut self, p: POINT) -> Option<Finish> {
+        if self.mode == Mode::Color {
+            self.cursor = self.clamp_pixel(p);
+            return Some(if shift_down() { Finish::PickRgb } else { Finish::PickHex });
+        }
         if let Some(button) = self.button_at(p) {
             let finish = self.press(button);
             self.redraw();
@@ -399,6 +434,10 @@ impl Overlay {
     }
 
     fn mouse_move(&mut self, p: POINT) {
+        if self.mode == Mode::Color {
+            self.move_loupe(self.clamp_pixel(p));
+            return;
+        }
         let p = self.clamp(p);
         match self.drag {
             Drag::None => {
@@ -444,6 +483,9 @@ impl Overlay {
 
     fn key(&mut self, vk: u16) -> Option<Finish> {
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) } < 0;
+        if self.mode == Mode::Color {
+            return self.color_key(vk);
+        }
         let has_sel = self.sel.is_some();
         let tool = |t| Button::Tool(t);
         match vk {
@@ -466,14 +508,102 @@ impl Overlay {
             0x42 if has_sel && !ctrl => {
                 self.press(tool(Tool::Blur));
             }
+            // C troca a captura pelo conta-gotas.
+            0x43 if !ctrl => self.start_color(),
             _ => return None,
         }
         self.redraw();
         None
     }
 
+    /// Entra no conta-gotas, com a lupa onde o mouse está.
+    fn start_color(&mut self) {
+        self.mode = Mode::Color;
+        self.sel = None;
+        self.shapes.clear();
+        self.current = None;
+        self.tool = None;
+        self.drag = Drag::None;
+        let mut p = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+        }
+        self.cursor = self.clamp_pixel(POINT { x: p.x - self.origin.x, y: p.y - self.origin.y });
+        self.redraw();
+    }
+
+    /// Enter copia a cor (Shift+Enter, em RGB); as setas andam 1 pixel (com Shift, 10).
+    fn color_key(&mut self, vk: u16) -> Option<Finish> {
+        let step = if shift_down() { 10 } else { 1 };
+        let (dx, dy) = match vk {
+            k if k == VK_ESCAPE.0 => return Some(Finish::Cancel),
+            k if k == VK_RETURN.0 => return Some(if shift_down() { Finish::PickRgb } else { Finish::PickHex }),
+            k if k == VK_LEFT.0 => (-step, 0),
+            k if k == VK_RIGHT.0 => (step, 0),
+            k if k == VK_UP.0 => (0, -step),
+            k if k == VK_DOWN.0 => (0, step),
+            _ => return None,
+        };
+        let p = self.clamp_pixel(POINT { x: self.cursor.x + dx, y: self.cursor.y + dy });
+        // Move o ponteiro de verdade: assim o clique seguinte cai no mesmo pixel.
+        unsafe {
+            let _ = SetCursorPos(p.x + self.origin.x, p.y + self.origin.y);
+        }
+        self.move_loupe(p);
+        None
+    }
+
+    /// Redesenha só onde a lupa estava e onde ela vai ficar: repintar a tela inteira a
+    /// cada movimento do mouse seria copiar dezenas de MB por segundo.
+    fn move_loupe(&mut self, p: POINT) {
+        if p.x == self.cursor.x && p.y == self.cursor.y {
+            return;
+        }
+        let (old, new) = (self.loupe_rect(self.cursor), self.loupe_rect(p));
+        self.cursor = p;
+        if !self.hwnd.is_invalid() {
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd), Some(&old), false);
+                let _ = InvalidateRect(Some(self.hwnd), Some(&new), false);
+            }
+        }
+    }
+
+    fn clamp_pixel(&self, p: POINT) -> POINT {
+        POINT { x: p.x.clamp(0, self.bright.width - 1), y: p.y.clamp(0, self.bright.height - 1) }
+    }
+
+    /// Cor do pixel na foto da tela, se ele estiver dentro dela.
+    fn pixel(&self, x: i32, y: i32) -> Option<(u8, u8, u8)> {
+        if x < 0 || y < 0 || x >= self.bright.width || y >= self.bright.height {
+            return None;
+        }
+        let i = (y as usize * self.bright.width as usize + x as usize) * 4;
+        let px = self.bright.pixels();
+        Some((px[i + 2], px[i + 1], px[i]))
+    }
+
+    /// A lupa fica embaixo à direita do cursor e muda de lado perto das bordas. O retângulo
+    /// inclui a etiqueta com o código da cor e uma margem para a moldura.
+    fn loupe_rect(&self, at: POINT) -> RECT {
+        let size = self.px(9.0) * LOUPE_CELLS;
+        let height = size + self.px(6.0) + self.px(30.0);
+        let gap = self.px(22.0);
+        let mut left = at.x + gap;
+        let mut top = at.y + gap;
+        if left + size > self.bright.width {
+            left = at.x - gap - size;
+        }
+        if top + height > self.bright.height {
+            top = at.y - gap - height;
+        }
+        RECT { left: left - 3, top: top - 3, right: left + size + 3, bottom: top + height + 3 }
+    }
+
     fn cursor_at(&self, p: POINT) -> PCWSTR {
-        if self.button_at(p).is_some() {
+        if self.mode == Mode::Color {
+            IDC_CROSS
+        } else if self.button_at(p).is_some() {
             IDC_HAND
         } else if self.tool.is_none() && self.sel.is_some_and(|s| contains(s, p)) && !matches!(self.drag, Drag::Select(_)) {
             IDC_SIZEALL
@@ -491,18 +621,58 @@ impl Overlay {
         Some(out)
     }
 
-    unsafe fn paint(&self, hdc: HDC) {
-        let _ = BitBlt(hdc, 0, 0, self.bright.width, self.bright.height, Some(self.dark.dc), 0, 0, SRCCOPY);
+    /// `dirty` é a parte que mudou; no conta-gotas só ela é redesenhada.
+    unsafe fn paint(&self, hdc: HDC, dirty: RECT) {
         let old_font = SelectObject(hdc, self.text_font.into());
-        match self.sel {
-            None => self.paint_hint(hdc),
-            Some(sel) => self.paint_selection(hdc, sel),
+        if self.mode == Mode::Color {
+            let (w, h) = (dirty.right - dirty.left, dirty.bottom - dirty.top);
+            let _ = BitBlt(hdc, dirty.left, dirty.top, w, h, Some(self.bright.dc), dirty.left, dirty.top, SRCCOPY);
+            self.paint_hint(hdc, "Clique copia a cor · Shift+clique copia em RGB · Setas ajustam · Esc cancela");
+            self.paint_loupe(hdc);
+        } else {
+            let _ = BitBlt(hdc, 0, 0, self.bright.width, self.bright.height, Some(self.dark.dc), 0, 0, SRCCOPY);
+            match self.sel {
+                None => self.paint_hint(hdc, "Arraste para selecionar · C pega uma cor · Esc cancela"),
+                Some(sel) => self.paint_selection(hdc, sel),
+            }
         }
         SelectObject(hdc, old_font);
     }
 
-    unsafe fn paint_hint(&self, hdc: HDC) {
-        let label = "Arraste para selecionar · Esc cancela";
+    /// A lupa: os pixels em volta do cursor ampliados numa grade, o do centro marcado, e
+    /// embaixo a cor dele com o código em HEX.
+    unsafe fn paint_loupe(&self, hdc: HDC) {
+        let frame_rect = self.loupe_rect(self.cursor);
+        let (left, top) = (frame_rect.left + 3, frame_rect.top + 3);
+        let cell = self.px(9.0);
+        let size = cell * LOUPE_CELLS;
+        let half = LOUPE_CELLS / 2;
+        // O fundo escuro aparece entre as células e vira a grade.
+        fill_rect(hdc, RECT { left: left - 1, top: top - 1, right: left + size + 1, bottom: top + size + 1 }, (0x14, 0x14, 0x14));
+        for dy in -half..=half {
+            for dx in -half..=half {
+                let color = self.pixel(self.cursor.x + dx, self.cursor.y + dy).unwrap_or((0x14, 0x14, 0x14));
+                let (x, y) = (left + (dx + half) * cell, top + (dy + half) * cell);
+                fill_rect(hdc, RECT { left: x, top: y, right: x + cell - 1, bottom: y + cell - 1 }, color);
+            }
+        }
+        let (cx, cy) = (left + half * cell, top + half * cell);
+        frame(hdc, RECT { left: cx - 2, top: cy - 2, right: cx + cell + 1, bottom: cy + cell + 1 }, (0x14, 0x14, 0x14));
+        frame(hdc, RECT { left: cx - 1, top: cy - 1, right: cx + cell, bottom: cy + cell }, (0xFF, 0xFF, 0xFF));
+
+        let Some(color) = self.pixel(self.cursor.x, self.cursor.y) else { return };
+        let label = RECT { left, top: top + size + self.px(6.0), right: left + size, bottom: top + size + self.px(36.0) };
+        fill_round(hdc, label, PANEL, Some(PANEL_BORDER), self.px(8.0));
+        let swatch = self.px(14.0);
+        let sx = label.left + self.px(9.0);
+        let sy = (label.top + label.bottom - swatch) / 2;
+        fill_rect(hdc, RECT { left: sx, top: sy, right: sx + swatch, bottom: sy + swatch }, color);
+        frame(hdc, RECT { left: sx, top: sy, right: sx + swatch, bottom: sy + swatch }, PANEL_TEXT);
+        let text_area = RECT { left: sx + swatch, top: label.top, right: label.right, bottom: label.bottom };
+        text(hdc, &crate::color::hex(color), text_area, PANEL_TEXT);
+    }
+
+    unsafe fn paint_hint(&self, hdc: HDC, label: &str) {
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
@@ -696,7 +866,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let _ = ReleaseCapture();
             None
         }
-        WM_LBUTTONDBLCLK => with_overlay(|o| o.sel.filter(|s| contains(*s, point)).map(|_| Finish::Copy)).flatten(),
+        WM_LBUTTONDBLCLK => with_overlay(|o| {
+            let in_sel = o.mode == Mode::Shot && o.sel.is_some_and(|s| contains(s, point));
+            in_sel.then_some(Finish::Copy)
+        })
+        .flatten(),
         WM_RBUTTONUP => Some(Finish::Cancel),
         WM_KEYDOWN => with_overlay(|o| o.key(wparam.0 as u16)).flatten(),
         // Alt+Tab ou clique em outra janela: a captura não pode ficar presa por cima de tudo.
@@ -731,11 +905,11 @@ unsafe fn paint_window(hwnd: HWND) {
         }
         match &o.back {
             Some(back) => {
-                o.paint(back.dc);
                 let r = ps.rcPaint;
+                o.paint(back.dc, r);
                 let _ = BitBlt(hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, Some(back.dc), r.left, r.top, SRCCOPY);
             }
-            None => o.paint(hdc),
+            None => o.paint(hdc, ps.rcPaint),
         }
     });
     let _ = EndPaint(hwnd, &ps);
@@ -747,6 +921,11 @@ unsafe fn finish_capture(hwnd: HWND, how: Finish) {
         return;
     }
     let _ = ShowWindow(hwnd, SW_HIDE);
+    if matches!(how, Finish::PickHex | Finish::PickRgb) {
+        pick_color(how);
+        let _ = DestroyWindow(hwnd);
+        return;
+    }
     let done = with_overlay(|o| {
         if how == Finish::Cancel {
             return None;
@@ -774,6 +953,28 @@ unsafe fn finish_capture(hwnd: HWND, how: Finish) {
         }
     }
     let _ = DestroyWindow(hwnd);
+}
+
+/// Copia a cor sob o cursor, em HEX ou RGB, e manda para o histórico.
+unsafe fn pick_color(how: Finish) {
+    let picked = with_overlay(|o| {
+        let color = o.pixel(o.cursor.x, o.cursor.y)?;
+        let text = if how == Finish::PickRgb { crate::color::rgb(color) } else { crate::color::hex(color) };
+        Some((text, o.on_color.take()))
+    })
+    .flatten();
+    let Some((text, on_color)) = picked else { return };
+    match win::set_clipboard(&Captured::Text(text.clone())) {
+        Ok(()) => println!("[cor] {text} copiado"),
+        Err(e) => eprintln!("[cor] não consegui copiar: {e}"),
+    }
+    if let Some(on_color) = on_color {
+        on_color(text);
+    }
+}
+
+fn shift_down() -> bool {
+    unsafe { GetKeyState(VK_SHIFT.0 as i32) < 0 }
 }
 
 /// Bitmap de 32 bits de cima para baixo, com um DC próprio para desenhar nele.
@@ -995,9 +1196,28 @@ pub fn self_test() {
             Shape::Arrow { from: p(760, 420), to: p(580, 240), color: 0 },
             Shape::Marker { points: vec![p(300, 445), p(500, 446), p(700, 444)], color: 1 },
         ];
+        let full = RECT { left: 0, top: 0, right: o.bright.width, bottom: o.bright.height };
         let Some(back) = Surface::new(o.bright.width, o.bright.height) else { return };
-        o.paint(back.dc);
-        for (surface, name) in [(Some(back), "target/shot-overlay.png"), (o.render(sel), "target/shot-result.png")] {
+        o.paint(back.dc, full);
+        // O conta-gotas sobre a mesma tela, com a lupa na borda da "janela" e do texto.
+        let mut picker = Overlay::new(Surface::new(full.right, full.bottom).unwrap(), None);
+        if let Some(picker) = &mut picker {
+            BitBlt(picker.bright.dc, 0, 0, full.right, full.bottom, Some(o.bright.dc), 0, 0, SRCCOPY).ok();
+            picker.mode = Mode::Color;
+            picker.cursor = p(226, 167);
+        }
+        let color_back = picker.as_ref().and_then(|picker| {
+            let back = Surface::new(full.right, full.bottom)?;
+            picker.paint(back.dc, full);
+            let color = picker.pixel(picker.cursor.x, picker.cursor.y)?;
+            println!("[cor] pixel sob o cursor de teste: {} / {}", crate::color::hex(color), crate::color::rgb(color));
+            Some(back)
+        });
+        for (surface, name) in [
+            (Some(back), "target/shot-overlay.png"),
+            (o.render(sel), "target/shot-result.png"),
+            (color_back, "target/color-overlay.png"),
+        ] {
             let Some(surface) = surface else { continue };
             match save_png(&surface, Some(Path::new(name)), PIXEL_FORMAT_32BPP_RGB) {
                 Ok(path) => println!("[print] {} salvo ({} × {})", path.display(), surface.width, surface.height),
@@ -1033,7 +1253,7 @@ pub fn memory_probe() -> Option<Vec<u8>> {
         ];
         o.back = Surface::new(w, h);
         if let Some(back) = &o.back {
-            o.paint(back.dc);
+            o.paint(back.dc, RECT { left: 0, top: 0, right: w, bottom: h });
         }
         Some(o.render(sel)?.to_dib())
     }

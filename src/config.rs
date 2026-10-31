@@ -28,6 +28,7 @@ pub struct Config {
     pub position: Position,
     pub popup_hotkey: Hotkey,
     pub shot_hotkey: Hotkey,
+    pub color_hotkey: Hotkey,
     /// Ctrl+Shift+1..9 com o popup aberto.
     pub quick_paste: bool,
     /// Nomes de processo (sem .exe) cujas cópias nunca entram no histórico.
@@ -45,6 +46,7 @@ impl Default for Config {
             position: Position::Caret,
             popup_hotkey: Hotkey::DEFAULT_POPUP,
             shot_hotkey: Hotkey::DEFAULT_SHOT,
+            color_hotkey: Hotkey::DEFAULT_COLOR,
             quick_paste: true,
             ignored_apps: Vec::new(),
             max_items: 500,
@@ -114,6 +116,7 @@ impl Config {
                 }
                 "atalho_historico" => c.popup_hotkey = Hotkey::parse(value).unwrap_or(c.popup_hotkey),
                 "atalho_captura" => c.shot_hotkey = Hotkey::parse(value).unwrap_or(c.shot_hotkey),
+                "atalho_cor" => c.color_hotkey = Hotkey::parse(value).unwrap_or(c.color_hotkey),
                 "colar_por_numero" => c.quick_paste = value != "nao",
                 "apps_ignorados" => {
                     c.ignored_apps = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
@@ -135,7 +138,7 @@ impl Config {
         let yes_no = |b: bool| if b { "sim" } else { "nao" };
         let text = format!(
             "# Preferências do Landpad. O app regrava este arquivo a cada mudança.\n\
-             tema = {}\nposicao = {}\natalho_historico = {}\natalho_captura = {}\n\
+             tema = {}\nposicao = {}\natalho_historico = {}\natalho_captura = {}\natalho_cor = {}\n\
              colar_por_numero = {}\napps_ignorados = {}\nmax_itens = {}\nguardar_imagens = {}\n\
              procurar_atualizacoes = {}\n",
             match self.theme {
@@ -150,6 +153,7 @@ impl Config {
             },
             self.popup_hotkey.to_config(),
             self.shot_hotkey.to_config(),
+            self.color_hotkey.to_config(),
             yes_no(self.quick_paste),
             self.ignored_apps.join(", "),
             self.max_items,

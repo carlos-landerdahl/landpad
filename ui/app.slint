@@ -6,6 +6,8 @@ export struct ClipRow {
     meta: string,
     kind: string,
     thumb: image,
+    // Cor do item, quando o texto é um código de cor (#2E63FF, rgb(…)).
+    swatch: color,
     pinned: bool,
 }
 
@@ -292,7 +294,21 @@ export component AppWindow inherits Window {
                                     vertical-alignment: center;
                                 }
 
-                                KindIcon {
+                                if row.kind == "color": Rectangle {
+                                    width: 16px;
+                                    Rectangle {
+                                        x: 1px;
+                                        y: (parent.height - 14px) / 2;
+                                        width: 14px;
+                                        height: 14px;
+                                        border-radius: 7px;
+                                        background: row.swatch;
+                                        border-width: 1px;
+                                        border-color: root.thumb-border;
+                                    }
+                                }
+
+                                if row.kind != "color": KindIcon {
                                     kind: row.kind;
                                     color: row.kind == "link" || row.kind == "image" ? root.link-color : row.kind == "code" ? root.muted : root.accent;
                                 }

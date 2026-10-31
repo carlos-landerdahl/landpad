@@ -101,6 +101,16 @@ pub fn apply_now() -> bool {
 /// Na partida: se há uma versão mais nova já baixada e conferida, instala antes de abrir
 /// qualquer janela. Devolve true se o instalador foi chamado e o app deve sair já.
 pub fn install_pending() -> bool {
+    // Instaladores de atualizações anteriores: rodaram da pasta temporária e não conseguem
+    // apagar a si mesmos.
+    if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("Landpad-Setup-") && name.ends_with(".exe") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
     let Ok(entries) = std::fs::read_dir(pending_dir()) else { return false };
     let mut newest: Option<(String, PathBuf)> = None;
     for entry in entries.flatten() {
@@ -131,7 +141,9 @@ pub fn install_pending() -> bool {
 fn run_installer(path: &Path) -> bool {
     let running = std::env::temp_dir().join(path.file_name().unwrap_or_default());
     let path = if std::fs::rename(path, &running).is_ok() { running } else { path.to_path_buf() };
-    match std::process::Command::new(&path).args(SILENT).spawn() {
+    // O log da última atualização fica ao lado da fila, para diagnosticar se algo der errado.
+    let log = format!("/LOG={}", pending_dir().with_file_name("atualizacao.log").display());
+    match std::process::Command::new(&path).args(SILENT).arg(log).spawn() {
         Ok(_) => true,
         Err(e) => {
             eprintln!("[atualização] não consegui abrir o instalador: {e}");

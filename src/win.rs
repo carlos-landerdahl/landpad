@@ -41,6 +41,7 @@ use crate::logo;
 
 const HOTKEY_ID: i32 = 1;
 const SHOT_ID: i32 = 2;
+const COLOR_ID: i32 = 3;
 /// Ctrl+Shift+1..9 usam os ids 10 a 18.
 const QUICK_ID: i32 = 10;
 /// Pedido da thread da interface para ligar (wparam 1) ou desligar os atalhos de número.
@@ -82,6 +83,7 @@ pub struct Handlers {
     /// Ctrl+Shift+número com o popup aberto; recebe 0 para o item 1.
     pub on_quick: Box<dyn Fn(usize) + Send>,
     pub on_shot: Box<dyn Fn() + Send>,
+    pub on_color: Box<dyn Fn() + Send>,
     pub on_tray: Box<dyn Fn(TrayCommand) + Send>,
     /// O Windows trocou entre claro e escuro.
     pub on_theme: Box<dyn Fn() + Send>,
@@ -102,6 +104,7 @@ pub enum TrayCommand {
     /// "Atualizar agora" ou "Baixar a versão nova", pelo menu ou pelo balão.
     Update,
     Shot,
+    Color,
     Pause,
     Settings,
     Quit,
@@ -121,10 +124,15 @@ impl Hotkey {
     /// PrtSc como o Lightshot.
     pub const DEFAULT_SHOT: Hotkey = Hotkey { mods: 0, vk: VK_SNAPSHOT.0 as u32 };
     const FALLBACK_SHOT: Hotkey = Hotkey { mods: MOD_CONTROL.0, vk: VK_SNAPSHOT.0 as u32 };
+    /// Win+Shift+C, o mesmo do conta-gotas do PowerToys: quem já usa, acerta de primeira.
+    /// Em alguns Windows ele já está tomado; aí vale Ctrl+Shift+PrtSc, da família da captura.
+    pub const DEFAULT_COLOR: Hotkey = Hotkey { mods: MOD_WIN.0 | MOD_SHIFT.0, vk: 0x43 };
+    const FALLBACK_COLOR: Hotkey = Hotkey { mods: MOD_CONTROL.0 | MOD_SHIFT.0, vk: VK_SNAPSHOT.0 as u32 };
 
     /// Como o atalho aparece para o usuário, com o nome da tecla no layout atual do teclado.
     pub fn label(self) -> String {
-        let mut parts: Vec<String> = [(MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift"), (MOD_WIN, "Win")]
+        // Na ordem que o Windows escreve: Win+Shift+C, Ctrl+Alt+V.
+        let mut parts: Vec<String> = [(MOD_WIN, "Win"), (MOD_CONTROL, "Ctrl"), (MOD_ALT, "Alt"), (MOD_SHIFT, "Shift")]
             .iter()
             .filter(|(m, _)| self.mods & m.0 != 0)
             .map(|(_, name)| name.to_string())
@@ -152,6 +160,7 @@ impl Hotkey {
         match self {
             Hotkey::DEFAULT_POPUP => Some(Hotkey::FALLBACK_POPUP),
             Hotkey::DEFAULT_SHOT => Some(Hotkey::FALLBACK_SHOT),
+            Hotkey::DEFAULT_COLOR => Some(Hotkey::FALLBACK_COLOR),
             _ => None,
         }
     }
@@ -196,6 +205,7 @@ fn key_name(vk: u32) -> String {
 pub struct Hotkeys {
     pub popup: Option<Hotkey>,
     pub shot: Option<Hotkey>,
+    pub color: Option<Hotkey>,
 }
 
 /// Onde o popup abre.
@@ -219,7 +229,8 @@ static FORMATS: OnceLock<Formats> = OnceLock::new();
 /// A janela oculta, para a thread da interface poder mandar pedidos para cá.
 static MESSAGE_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Atalhos que a interface quer; a thread do Windows registra quando recebe WM_HOTKEYS.
-static WANTED: Mutex<(Hotkey, Hotkey)> = Mutex::new((Hotkey::DEFAULT_POPUP, Hotkey::DEFAULT_SHOT));
+static WANTED: Mutex<(Hotkey, Hotkey, Hotkey)> =
+    Mutex::new((Hotkey::DEFAULT_POPUP, Hotkey::DEFAULT_SHOT, Hotkey::DEFAULT_COLOR));
 /// Regras de captura, lidas a cada cópia.
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static KEEP_IMAGES: AtomicBool = AtomicBool::new(true);
@@ -245,8 +256,8 @@ thread_local! {
 }
 
 /// Sobe a thread do Windows e devolve os atalhos que conseguiu registrar.
-pub fn start(handlers: Handlers, options: Options, popup: Hotkey, shot: Hotkey) -> Result<Hotkeys, String> {
-    *WANTED.lock().unwrap() = (popup, shot);
+pub fn start(handlers: Handlers, options: Options, keys: (Hotkey, Hotkey, Hotkey)) -> Result<Hotkeys, String> {
+    *WANTED.lock().unwrap() = keys;
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("landpad-win".into())
@@ -337,14 +348,18 @@ unsafe fn setup(options: &Options) -> Result<Hotkeys, String> {
 /// Lightshot, por exemplo), tenta o alternativo.
 unsafe fn register_hotkeys(hwnd: HWND) -> Hotkeys {
     unregister_hotkeys(hwnd);
-    let (popup, shot) = *WANTED.lock().unwrap();
+    let (popup, shot, color) = *WANTED.lock().unwrap();
     let register = |id: i32, want: Hotkey| {
         [Some(want), want.fallback()]
             .into_iter()
             .flatten()
             .find(|h| RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(h.mods) | MOD_NOREPEAT, h.vk).is_ok())
     };
-    let active = Hotkeys { popup: register(HOTKEY_ID, popup), shot: register(SHOT_ID, shot) };
+    let active = Hotkeys {
+        popup: register(HOTKEY_ID, popup),
+        shot: register(SHOT_ID, shot),
+        color: register(COLOR_ID, color),
+    };
     ACTIVE.with(|a| a.set(active));
     active
 }
@@ -352,11 +367,12 @@ unsafe fn register_hotkeys(hwnd: HWND) -> Hotkeys {
 unsafe fn unregister_hotkeys(hwnd: HWND) {
     let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
     let _ = UnregisterHotKey(Some(hwnd), SHOT_ID);
+    let _ = UnregisterHotKey(Some(hwnd), COLOR_ID);
 }
 
 /// Pede para registrar os atalhos de novo; o resultado chega em `on_hotkeys`.
-pub fn set_hotkeys(popup: Hotkey, shot: Hotkey) {
-    *WANTED.lock().unwrap() = (popup, shot);
+pub fn set_hotkeys(keys: (Hotkey, Hotkey, Hotkey)) {
+    *WANTED.lock().unwrap() = keys;
     post(WM_HOTKEYS, 1);
 }
 
@@ -533,6 +549,7 @@ const CMD_PAUSE: usize = 3;
 const CMD_SETTINGS: usize = 4;
 const CMD_QUIT: usize = 5;
 const CMD_UPDATE: usize = 6;
+const CMD_COLOR: usize = 7;
 
 unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let Ok(menu) = CreatePopupMenu() else { return };
@@ -546,6 +563,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     };
     let open = item("Abrir histórico", active.popup);
     let shot = item("Capturar a tela", active.shot);
+    let color = item("Pegar cor da tela", active.color);
     let pause = item("Pausar a captura", None);
     let settings = item("Configurações…", None);
     let quit = item("Sair", None);
@@ -560,6 +578,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     }
     let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, PCWSTR(open.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_SHOT, PCWSTR(shot.as_ptr()));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_COLOR, PCWSTR(color.as_ptr()));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING | paused, CMD_PAUSE, PCWSTR(pause.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, PCWSTR(settings.as_ptr()));
@@ -574,6 +593,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let command = match cmd.0 as usize {
         CMD_OPEN => TrayCommand::Open,
         CMD_SHOT => TrayCommand::Shot,
+        CMD_COLOR => TrayCommand::Color,
         CMD_PAUSE => TrayCommand::Pause,
         CMD_SETTINGS => TrayCommand::Settings,
         CMD_QUIT => TrayCommand::Quit,
@@ -663,6 +683,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     (h.on_hotkey)(t0, target);
                 }
             });
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 == COLOR_ID as usize => {
+            notify(|h| (h.on_color)());
             LRESULT(0)
         }
         WM_HOTKEY if wparam.0 == SHOT_ID as usize => {

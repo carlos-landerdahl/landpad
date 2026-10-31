@@ -113,6 +113,9 @@ fn fill(w: &SettingsWindow) {
         let (label, status) = hotkey_text(c.shot_hotkey, st.hotkeys.shot);
         w.set_shot_hotkey(label.into());
         w.set_shot_status(status.into());
+        let (label, status) = hotkey_text(c.color_hotkey, st.hotkeys.color);
+        w.set_color_hotkey(label.into());
+        w.set_color_status(status.into());
     });
 }
 
@@ -246,11 +249,12 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
     }
     if let Some(key) = key {
         let problem = with_state(|st| {
-            let other = if which == 1 { st.config.shot_hotkey } else { st.config.popup_hotkey };
+            let c = &st.config;
+            let others = [(1, c.popup_hotkey), (2, c.shot_hotkey), (3, c.color_hotkey)];
             if !key.is_valid() {
                 Some("Use Ctrl, Alt, Shift ou Win junto".to_string())
-            } else if key == other {
-                Some(format!("{} já é o outro atalho", key.label()))
+            } else if others.iter().any(|&(id, k)| id != which && k == key) {
+                Some(format!("{} já é outro atalho do Landpad", key.label()))
             } else {
                 None
             }
@@ -262,10 +266,10 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
         }
         with_state(|st| {
             let mut c = st.config.clone();
-            if which == 1 {
-                c.popup_hotkey = key;
-            } else {
-                c.shot_hotkey = key;
+            match which {
+                1 => c.popup_hotkey = key,
+                2 => c.shot_hotkey = key,
+                _ => c.color_hotkey = key,
             }
             apply_config(st, c);
         });
@@ -275,8 +279,8 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
     }
     w.set_recording(0);
     w.set_record_hint(RECORD_HINT.into());
-    let (popup, shot) = with_state(|st| (st.config.popup_hotkey, st.config.shot_hotkey));
-    win::set_hotkeys(popup, shot);
+    let keys = with_state(|st| (st.config.popup_hotkey, st.config.shot_hotkey, st.config.color_hotkey));
+    win::set_hotkeys(keys);
     fill(&w);
 }
 

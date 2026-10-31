@@ -190,7 +190,9 @@ export component SettingsWindow inherits Window {
     in property <string> shot-hotkey;
     in property <string> popup-status;
     in property <string> shot-status;
-    // 0: nada sendo gravado; 1: atalho do histórico; 2: atalho da captura.
+    in property <string> color-hotkey;
+    in property <string> color-status;
+    // 0: nada sendo gravado; 1: atalho do histórico; 2: da captura; 3: do conta-gotas.
     in-out property <int> recording;
     in property <string> record-hint: "Aperte o atalho…";
     in-out property <bool> quick-paste;
@@ -418,6 +420,25 @@ export component SettingsWindow inherits Window {
                             change => {
                                 root.recording = 2;
                                 root.record(2);
+                            }
+                            cancel => {
+                                root.cancel-record();
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Pegar cor da tela";
+                        description: root.color-status != "" ? root.color-status : "Uma lupa mostra os pixels; o clique copia o código da cor.";
+                        description-color: root.color-status != "" ? root.warning : root.muted;
+                        HotkeyEditor {
+                            label: root.recording == 3 ? root.record-hint : root.color-hotkey;
+                            recording: root.recording == 3;
+                            enabled: root.recording == 0;
+                            accent: root.accent;
+                            change => {
+                                root.recording = 3;
+                                root.record(3);
                             }
                             cancel => {
                                 root.cancel-record();
