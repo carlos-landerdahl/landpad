@@ -65,12 +65,20 @@ pub fn check(on_found: impl FnOnce(&str, bool) + Send + 'static) {
     });
 }
 
-/// `--check-update`: consulta o GitHub agora e mostra o resultado, sem baixar nada.
+/// `--check-update`: consulta o GitHub agora, baixa o instalador da última versão e
+/// confere o SHA-256, como a atualização faria, mas não guarda nem instala nada.
 pub fn report() {
     match latest() {
         Ok(Some(r)) => {
             let status = if newer(&r.version, VERSION) { "mais nova que esta" } else { "esta já é a mais recente" };
             println!("[atualização] última versão publicada: {} ({status}); instalado: {}", r.version, installed());
+            match fetch_verified(&r.version) {
+                Ok(setup) => println!(
+                    "[atualização] instalador de {:.1} MB baixado e conferido com o SHA-256 publicado",
+                    setup.len() as f64 / (1024.0 * 1024.0)
+                ),
+                Err(e) => eprintln!("[atualização] o download falharia: {e}"),
+            }
         }
         Ok(None) => println!("[atualização] ainda não há versões publicadas no GitHub"),
         Err(e) => eprintln!("[atualização] não consegui consultar o GitHub: {e}"),
@@ -162,6 +170,17 @@ fn latest() -> Result<Option<Release>, String> {
 
 /// Baixa o instalador e o .sha256 publicados na release e só guarda se baterem.
 fn download(version: &str) -> Result<PathBuf, String> {
+    let setup = fetch_verified(version)?;
+    let dir = pending_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(format!("Landpad-Setup-{version}.exe"));
+    std::fs::write(&path, setup).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// O instalador da versão, já conferido com o SHA-256 publicado junto.
+fn fetch_verified(version: &str) -> Result<Vec<u8>, String> {
     let name = format!("Landpad-Setup-{version}.exe");
     let base = format!("/{REPO}/releases/download/v{version}/{name}");
     let (status, setup) = request("github.com", &base)?;
@@ -177,12 +196,7 @@ fn download(version: &str) -> Result<PathBuf, String> {
     if sha256_hex(&setup)? != expected {
         return Err("o arquivo baixado não confere com o SHA-256 publicado".into());
     }
-    let dir = pending_dir();
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join(name);
-    std::fs::write(&path, setup).map_err(|e| e.to_string())?;
-    Ok(path)
+    Ok(setup)
 }
 
 fn sha256_hex(data: &[u8]) -> Result<String, String> {

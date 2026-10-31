@@ -28,7 +28,7 @@ Todos rodam com o Landpad aberto ao lado: usam uma pasta de imagens própria (`i
 | `cargo run --release -- --settings-test` | Abre as configurações fora da tela e fotografa cada página em `target/settings-N.bmp` |
 | `cargo run --release -- --shot-test` | Desenha a captura com anotações sobre uma área de trabalho de mentira em `target/shot-*.png` |
 | `cargo run --release -- --memory-test` | Popup, configurações e capturas em ciclos, medindo a memória a cada um |
-| `cargo run --release -- --check-update` | Consulta a última versão publicada no GitHub, sem baixar nada |
+| `cargo run --release -- --check-update` | Consulta a última versão no GitHub, baixa o instalador e confere o SHA-256, sem instalar |
 | `cargo run --release -- --export-assets <pasta>` | Grava o ícone em PNG e `.ico` nos tamanhos do README, do instalador e da Store |
 
 ## Publicar uma versão
