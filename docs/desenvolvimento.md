@@ -27,7 +27,8 @@ Todos rodam com o Landpad aberto ao lado: usam uma pasta de imagens própria (`i
 | `cargo test --release` | Testes de unidade (versões, leitura da release, SHA-256) |
 | `cargo run --release -- --bench` | Enche o histórico, abre e fecha o popup 10 vezes sem roubar o foco, mede e salva `target/popup.bmp` |
 | `cargo run --release -- --settings-test` | Abre as configurações fora da tela e fotografa cada página em `target/settings-N.bmp` |
-| `cargo run --release -- --shot-test` | Desenha a captura com anotações sobre uma área de trabalho de mentira em `target/shot-*.png` |
+| `cargo run --release -- --shot-test` | Desenha a captura com anotações sobre uma área de trabalho de mentira em `target/shot-*.png`, inclusive o estado da ferramenta de texto sem letras, que derrubava a 0.2.0 |
+| `cargo run --release -- --shot-now` | Abre a captura de verdade meio segundo depois de iniciar, sem atalhos nem bandeja, para reproduzir um fluxo com o mouse; fecha ao terminar a captura ou em 60 s |
 | `cargo run --release -- --memory-test` | Popup, configurações e capturas em ciclos, medindo a memória a cada um |
 | `cargo run --release -- --check-update` | Consulta a última versão no GitHub, baixa o instalador e confere o SHA-256, sem instalar |
 | `cargo run --release -- --export-assets <pasta>` | Grava o ícone em PNG e `.ico` nos tamanhos do README, do instalador e da Store |

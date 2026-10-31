@@ -209,6 +209,9 @@ export component SettingsWindow inherits Window {
     // Rodando com config.ini ao lado do executável: tudo fica naquela pasta.
     in property <bool> portable;
     in property <bool> show-updates: true;
+    // Versão nova encontrada pelo atualizador (vazio se nenhuma) e se já está baixada e conferida.
+    in property <string> update-version;
+    in property <bool> update-ready;
     in property <string> history-status;
     // Houve uma limpeza recente que ainda dá para desfazer.
     in property <bool> can-undo;
@@ -220,6 +223,8 @@ export component SettingsWindow inherits Window {
     callback edited();
     callback undo-clear();
     callback reset-hotkeys();
+    // "Atualizar agora": o Landpad fecha, instala a versão baixada e reabre.
+    callback apply-update();
     callback autostart-toggled(bool);
     callback record(int);
     callback cancel-record();
@@ -778,6 +783,23 @@ export component SettingsWindow inherits Window {
                                     text: "Suas cópias pousam aqui.";
                                     font-size: 13px;
                                     color: root.muted;
+                                }
+                            }
+                        }
+                    }
+                    // Versão nova à espera: o mesmo que o balão da bandeja avisou, só que fica aqui.
+                    if root.show-updates && root.update-version != "": Row {
+                        dark: root.dark;
+                        title: root.update-ready ? "Versão " + root.update-version + " pronta para instalar" : "Versão " + root.update-version + " disponível";
+                        description: root.update-ready ? "Baixada e conferida. Instala sozinha na próxima vez que o Landpad abrir. Atualizar agora fecha o Landpad, instala e reabre; o que não está fixado se perde." : "Atualizar agora baixa e abre o instalador.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Atualizar agora";
+                                primary: true;
+                                clicked => {
+                                    root.apply-update();
                                 }
                             }
                         }

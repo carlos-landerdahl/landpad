@@ -21,13 +21,14 @@ use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_
 use windows::Win32::Graphics::Gdi::*;
 // Sem glob: o GDI+ exporta uma constante `Ok` que esconderia o Ok do Rust.
 use windows::Win32::Graphics::GdiPlus::{
-    CombineModeReplace, GdipCreateAdjustableArrowCap, GdipCreateBitmapFromScan0, GdipCreateFromHDC, GdipCreatePen1,
-    GdipCreateSolidFill, GdipDeleteBrush, GdipDeleteCustomLineCap, GdipDeleteGraphics, GdipDeletePen, GdipDisposeImage,
-    GdipDrawEllipseI, GdipDrawLineI, GdipDrawLinesI, GdipDrawRectangleI, GdipFillEllipseI, GdipSaveImageToFile,
+    CombineModeReplace, FillModeAlternate, GdipAddPathArcI, GdipClosePathFigure, GdipCreateAdjustableArrowCap,
+    GdipCreateBitmapFromScan0, GdipCreateFromHDC, GdipCreatePath, GdipCreatePen1, GdipCreateSolidFill, GdipDeleteBrush,
+    GdipDeleteCustomLineCap, GdipDeleteGraphics, GdipDeletePath, GdipDeletePen, GdipDisposeImage, GdipDrawEllipseI,
+    GdipDrawLineI, GdipDrawLinesI, GdipDrawRectangleI, GdipFillEllipseI, GdipFillPath, GdipSaveImageToFile,
     GdipSetClipRectI, GdipSetPenCustomEndCap, GdipSetPenEndCap, GdipSetPenLineJoin, GdipSetPenStartCap,
     GdipSetSmoothingMode, GdiplusShutdown, GdiplusStartup, GdiplusStartupInput, GpAdjustableArrowCap, GpBitmap, GpBrush,
-    GpCustomLineCap, GpGraphics, GpImage, GpPen, GpSolidFill, LineCapRound, LineJoinRound, Point, SmoothingModeAntiAlias,
-    UnitPixel,
+    GpCustomLineCap, GpGraphics, GpImage, GpPath, GpPen, GpSolidFill, LineCapRound, LineJoinRound, Point,
+    SmoothingModeAntiAlias, UnitPixel,
 };
 use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -752,6 +753,7 @@ impl Overlay {
             self.shapes.push(shape);
         }
         self.invalidate_selection();
+        self.invalidate(self.hint_strip(self.hint_area));
     }
 
     /// Repinta a seleção com uma folga: é onde as anotações aparecem.
@@ -836,6 +838,8 @@ impl Overlay {
                     self.current = Some(Shape::start(Tool::Text, p, self.color, 0));
                     self.editing = true;
                     self.invalidate_selection();
+                    // A dica do topo passa a explicar as teclas do texto.
+                    self.invalidate(self.hint_strip(self.hint_area));
                 }
                 Some(Tool::Number) => {
                     let n = self.next_number();
@@ -1041,17 +1045,36 @@ impl Overlay {
         None
     }
 
-    /// Caracteres digitados no rótulo de texto. Enter conclui, Esc descarta, Backspace apaga.
-    fn char_input(&mut self, ch: u16) {
+    /// Caracteres digitados no rótulo de texto. Enter quebra a linha; Ctrl+Enter ou Ctrl+C
+    /// concluem o rótulo e copiam a captura (quem quer seguir anotando clica em outro lugar,
+    /// que também conclui); Esc descarta só o rótulo; Backspace apaga.
+    fn char_input(&mut self, ch: u16) -> Option<Finish> {
         if !self.editing {
-            return;
+            return None;
         }
         match ch {
-            0x0D => self.commit_text(),
+            // Ctrl+Enter chega como 0x0A e Ctrl+C como 0x03: concluem o rótulo e copiam a
+            // captura. Ctrl+S (0x13) conclui e salva.
+            0x0A | 0x03 => {
+                self.commit_text();
+                return Some(Finish::Copy);
+            }
+            0x13 => {
+                self.commit_text();
+                return Some(Finish::Save);
+            }
+            // Enter quebra a linha, como num editor; a legenda cresce para baixo.
+            0x0D => {
+                if let Some(Shape::Text { text, .. }) = &mut self.current {
+                    text.push('\n');
+                }
+                self.invalidate_selection();
+            }
             0x1B => {
                 self.editing = false;
                 self.current = None;
                 self.invalidate_selection();
+                self.invalidate(self.hint_strip(self.hint_area));
             }
             0x08 => {
                 if let Some(Shape::Text { text, .. }) = &mut self.current {
@@ -1067,6 +1090,7 @@ impl Overlay {
             }
             _ => {}
         }
+        None
     }
 
     /// Entra no conta-gotas, com a lupa onde o mouse está.
@@ -1239,7 +1263,12 @@ impl Overlay {
                     }
                     self.paint_hint(hdc, "Arraste para selecionar · Clique numa janela para pegá-la inteira · C pega uma cor · Esc cancela", PANEL_TEXT, 0);
                 }
-                Some(sel) => self.paint_selection(hdc, sel, dirty),
+                Some(sel) => {
+                    self.paint_selection(hdc, sel, dirty);
+                    if self.editing {
+                        self.paint_hint(hdc, "Enter quebra a linha · Ctrl+Enter ou Ctrl+C copia · Esc descarta o texto", PANEL_TEXT, 0);
+                    }
+                }
             }
             if let Some(notice) = &self.notice {
                 self.paint_hint(hdc, notice, WARNING, 1);
@@ -1409,10 +1438,15 @@ impl Overlay {
     unsafe fn paint_caret(&self, hdc: HDC, sel: RECT) {
         let Some(Shape::Text { at, text: label, color }) = &self.current else { return };
         let old = SelectObject(hdc, self.fonts.label.into());
-        let width = text_width(hdc, label);
+        let (lines, _, line_h) = caption_metrics(hdc, label);
+        let last = lines.last().map(String::as_str).unwrap_or("");
+        let width = text_width(hdc, last);
         SelectObject(hdc, old);
-        let x = at.x + width + 1;
-        let r = RECT { left: x, top: at.y, right: x + self.px(2.0), bottom: at.y + self.px(22.0) };
+        // Depois da última linha, dentro da faixa da legenda.
+        let (padx, pady) = caption_padding(self.scale);
+        let x = at.x + padx + width + 1;
+        let top = at.y + pady + (lines.len() as i32 - 1) * line_h;
+        let r = RECT { left: x, top, right: x + self.px(2.0), bottom: top + line_h };
         if let Some(r) = intersect(r, sel) {
             fill_rect(hdc, r, COLORS[*color]);
         }
@@ -1510,12 +1544,19 @@ unsafe fn draw_shapes<'a>(
             Shape::Text { at: p, text: label, color } => {
                 let (x, y) = at(*p);
                 SelectObject(hdc, fonts.label.into());
-                // Um contorno escuro fino em volta deixa o texto legível em fundo claro ou escuro.
-                let dark = if *color == COLORS.len() - 1 { (0xFF, 0xFF, 0xFF) } else { OUTLINE };
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    draw_text_at(hdc, label, x + dx, y + dy, dark);
+                // Estilo legenda: o texto em cor sólida sobre uma faixa arredondada
+                // semitransparente, escura (ou clara, quando o texto é preto). Fica legível em
+                // qualquer fundo sem o serrilhado de um contorno.
+                let (lines, w, line_h) = caption_metrics(hdc, label);
+                let (padx, pady) = caption_padding(scale);
+                let h = line_h * lines.len() as i32;
+                let pill = RECT { left: x, top: y, right: x + w + 2 * padx, bottom: y + h + 2 * pady };
+                let dark_text = *color == COLORS.len() - 1;
+                let fill = if dark_text { argb(0xD4, (0xFF, 0xFF, 0xFF)) } else { argb(0xB4, PANEL) };
+                fill_round_alpha(hdc, pill, (6.0 * scale) as i32, fill);
+                for (i, line) in lines.iter().enumerate() {
+                    draw_text_at(hdc, line, x + padx, y + pady + i as i32 * line_h, COLORS[*color]);
                 }
-                draw_text_at(hdc, label, x, y, COLORS[*color]);
             }
             Shape::Number { at: p, n, color } => {
                 let (x, y) = at(*p);
@@ -1604,10 +1645,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         .flatten(),
         WM_RBUTTONUP => Some(Finish::Cancel),
         WM_KEYDOWN => with_overlay(|o| o.key(wparam.0 as u16)).flatten(),
-        WM_CHAR => {
-            with_overlay(|o| o.char_input(wparam.0 as u16));
-            None
-        }
+        WM_CHAR => with_overlay(|o| o.char_input(wparam.0 as u16)).flatten(),
         WM_TIMER if wparam.0 == TIMER_TOOLTIP => {
             with_overlay(|o| o.tooltip_timer());
             None
@@ -2147,7 +2185,7 @@ pub fn self_test() {
             Shape::Line { from: p(300, 520), to: p(700, 520), color: 3 },
             Shape::Number { at: p(275, 225), n: 1, color: 2 },
             Shape::Number { at: p(770, 440), n: 2, color: 2 },
-            Shape::Text { at: p(640, 480), text: "Entrega até 14h".into(), color: 4 },
+            Shape::Text { at: p(640, 470), text: "Entrega até 14h\nPortão 3".into(), color: 4 },
         ];
         let full = RECT { left: 0, top: 0, right: o.bright.width, bottom: o.bright.height };
         // A barra com a paleta aberta e, numa segunda imagem, a dica de um botão.
@@ -2161,6 +2199,21 @@ pub fn self_test() {
         if let Some(tb) = &tooltip_back {
             o.paint(tb.dc, full);
         }
+        // O estado que derrubava o app na 0.2.0: ferramenta de texto recém-clicada, ainda sem
+        // nenhuma letra. Pintar isso chamava o DrawTextW com zero caracteres e um ponteiro
+        // que não apontava para nada.
+        o.hover = None;
+        o.tooltip = false;
+        o.tool = Some(Tool::Text);
+        o.current = Some(Shape::start(Tool::Text, p(400, 300), 0, 0));
+        o.editing = true;
+        if let Some(cb) = Surface::new(o.bright.width, o.bright.height) {
+            o.paint(cb.dc, full);
+            println!("[print] ferramenta de texto sem letras pintada sem erro");
+        }
+        o.editing = false;
+        o.current = None;
+        o.tool = Some(Tool::Arrow);
         // Sem seleção, com uma "janela" sob o mouse destacada.
         let window_back = Surface::new(o.bright.width, o.bright.height);
         if let Some(wb) = &window_back {
@@ -2304,6 +2357,9 @@ unsafe fn font(px: i32, weight: i32, face: PCWSTR) -> HFONT {
 
 /// Texto centrado no retângulo, numa linha só.
 unsafe fn text(hdc: HDC, s: &str, mut r: RECT, color: (u8, u8, u8)) {
+    if s.is_empty() {
+        return;
+    }
     let mut wide: Vec<u16> = s.encode_utf16().collect();
     SetTextColor(hdc, rgb(color));
     SetBkMode(hdc, TRANSPARENT);
@@ -2311,7 +2367,14 @@ unsafe fn text(hdc: HDC, s: &str, mut r: RECT, color: (u8, u8, u8)) {
 }
 
 /// Texto a partir do canto superior esquerdo, sem recorte (o clip do DC cuida disso).
+///
+/// Com a string vazia não chama o Windows: com zero caracteres o DrawTextW ainda lê o
+/// ponteiro, e o de um Vec vazio não aponta para memória nenhuma. Era isso que derrubava o
+/// app no clique da ferramenta de texto, antes da primeira letra.
 unsafe fn draw_text_at(hdc: HDC, s: &str, x: i32, y: i32, color: (u8, u8, u8)) {
+    if s.is_empty() {
+        return;
+    }
     let mut wide: Vec<u16> = s.encode_utf16().collect();
     let mut r = RECT { left: x, top: y, right: x, bottom: y };
     SetTextColor(hdc, rgb(color));
@@ -2319,10 +2382,55 @@ unsafe fn draw_text_at(hdc: HDC, s: &str, x: i32, y: i32, color: (u8, u8, u8)) {
 }
 
 unsafe fn text_width(hdc: HDC, s: &str) -> i32 {
-    let wide: Vec<u16> = s.encode_utf16().collect();
+    text_extent(hdc, s).0
+}
+
+/// Largura e altura do texto na fonte selecionada. Vazio mede largura zero, mas a altura
+/// de uma linha, para a faixa da legenda já aparecer enquanto se digita a primeira letra.
+unsafe fn text_extent(hdc: HDC, s: &str) -> (i32, i32) {
+    let wide: Vec<u16> = if s.is_empty() { "Ag".encode_utf16().collect() } else { s.encode_utf16().collect() };
     let mut size = SIZE::default();
     let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
-    size.cx
+    (if s.is_empty() { 0 } else { size.cx }, size.cy)
+}
+
+/// As linhas de uma legenda, a largura da mais larga e a altura de uma linha, na fonte
+/// selecionada. Uma legenda vazia tem uma linha vazia, para a faixa e a barrinha aparecerem.
+unsafe fn caption_metrics(hdc: HDC, label: &str) -> (Vec<String>, i32, i32) {
+    let lines: Vec<String> = label.split('\n').map(str::to_string).collect();
+    let line_h = text_extent(hdc, "").1;
+    let w = lines.iter().map(|l| text_width(hdc, l)).max().unwrap_or(0);
+    (lines, w, line_h)
+}
+
+/// Folga da faixa da legenda em volta do texto: horizontal e vertical.
+fn caption_padding(scale: f32) -> (i32, i32) {
+    ((8.0 * scale) as i32, (4.0 * scale) as i32)
+}
+
+/// Retângulo arredondado com transparência por cima do que já está no DC, com GDI+.
+unsafe fn fill_round_alpha(hdc: HDC, r: RECT, radius: i32, color: u32) {
+    let mut g: *mut GpGraphics = std::ptr::null_mut();
+    if GdipCreateFromHDC(hdc, &mut g).0 != 0 {
+        return;
+    }
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+    let mut path: *mut GpPath = std::ptr::null_mut();
+    if GdipCreatePath(FillModeAlternate, &mut path).0 == 0 {
+        let d = (radius * 2).min(r.right - r.left).min(r.bottom - r.top).max(1);
+        GdipAddPathArcI(path, r.left, r.top, d, d, 180.0, 90.0);
+        GdipAddPathArcI(path, r.right - d, r.top, d, d, 270.0, 90.0);
+        GdipAddPathArcI(path, r.right - d, r.bottom - d, d, d, 0.0, 90.0);
+        GdipAddPathArcI(path, r.left, r.bottom - d, d, d, 90.0, 90.0);
+        GdipClosePathFigure(path);
+        let mut brush: *mut GpSolidFill = std::ptr::null_mut();
+        if GdipCreateSolidFill(color, &mut brush).0 == 0 {
+            GdipFillPath(g, brush as *mut GpBrush, path);
+            GdipDeleteBrush(brush as *mut GpBrush);
+        }
+        GdipDeletePath(path);
+    }
+    GdipDeleteGraphics(g);
 }
 
 unsafe fn fill_round(hdc: HDC, r: RECT, fill: (u8, u8, u8), border: Option<(u8, u8, u8)>, radius: i32) {

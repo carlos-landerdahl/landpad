@@ -112,6 +112,12 @@ fn fill(w: &SettingsWindow) {
         w.set_portable(config::portable_dir().is_some());
         // Na versão da Microsoft Store quem atualiza é a loja.
         w.set_show_updates(!win::is_packaged());
+        let (version, ready) = match win::pending_update() {
+            Some((version, state)) => (version, state == crate::update::UpdateState::Ready),
+            None => (String::new(), false),
+        };
+        w.set_update_version(version.into());
+        w.set_update_ready(ready);
         w.set_history_status(history_status(st).into());
         w.set_can_undo(cleared_count(st) > 0);
         let (popup, shot, color, prev) = default_hotkeys();
@@ -255,6 +261,7 @@ fn wire(w: &SettingsWindow) {
     });
 
     w.on_open_repo(|| win::open_url(&format!("https://github.com/{}", crate::update::REPO)));
+    w.on_apply_update(crate::update::apply_now);
 
     let weak = w.as_weak();
     w.on_undo_clear(move || {
@@ -342,6 +349,8 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
 /// target/settings-N.bmp e fecha o app.
 pub fn self_test() {
     TESTING.with(|t| t.set(true));
+    // Uma versão nova de mentira, para a página Sobre sair com o aviso e o botão.
+    win::announce_update("9.9.9", crate::update::UpdateState::Ready);
     open();
     let Some(w) = current() else { return };
     w.window().set_position(slint::PhysicalPosition::new(-32000, -32000));

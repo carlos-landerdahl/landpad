@@ -499,6 +499,11 @@ pub fn balloon(title: &str, text: &str, click: TrayCommand) {
 }
 
 /// Guarda a versão nova para o menu da bandeja e avisa com um balão.
+/// A versão nova já anunciada, para a página Sobre mostrar o mesmo que o balão disse.
+pub fn pending_update() -> Option<(String, UpdateState)> {
+    UPDATE.lock().unwrap().clone()
+}
+
 pub fn announce_update(version: &str, state: UpdateState) {
     *UPDATE.lock().unwrap() = Some((version.to_string(), state));
     let (title, text) = match state {

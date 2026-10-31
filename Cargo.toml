@@ -1,6 +1,6 @@
 [package]
 name = "landpad"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Gerenciador de área de transferência leve para Windows, com captura de tela"
 license = "MIT"

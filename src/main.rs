@@ -181,7 +181,7 @@ fn main() -> Result<(), slint::PlatformError> {
         return Ok(());
     }
     // Os modos de teste rodam ao lado do app de verdade, com uma pasta de imagens só deles.
-    let testing = flag("--bench") || flag("--settings-test") || flag("--memory-test");
+    let testing = flag("--bench") || flag("--settings-test") || flag("--memory-test") || flag("--shot-now");
     if testing {
         images::use_test_dir();
     } else {
@@ -510,6 +510,9 @@ fn main() -> Result<(), slint::PlatformError> {
         BENCH.with(|c| c.set(true));
         settings::memory_test(&ui);
     }
+    if flag("--shot-now") {
+        shot_now();
+    }
 
     let result = slint::run_event_loop_until_quit();
     win::shutdown();
@@ -530,7 +533,11 @@ fn schedule_update_checks() {
 
 fn check_for_update() {
     if with_state(|st| st.config.check_updates) {
-        update::check(win::announce_update);
+        update::check(|version, state| {
+            win::announce_update(version, state);
+            // A página Sobre, se estiver aberta, passa a mostrar a versão e o botão de atualizar.
+            let _ = slint::invoke_from_event_loop(settings::sync);
+        });
     }
 }
 
@@ -566,6 +573,29 @@ fn open_capture(mode: shot::Mode) {
             let _ = slint::invoke_from_event_loop(move || add_clip(Content::Text(text), source.into()));
         },
     );
+}
+
+/// `--shot-now`: abre a captura de verdade meio segundo depois de iniciar, sem atalho nem
+/// bandeja, para um script dirigir o mouse e o teclado e reproduzir um fluxo. O app fecha
+/// quando a captura termina, ou em 60 s.
+fn shot_now() {
+    slint::Timer::single_shot(Duration::from_millis(500), || {
+        shot::open(
+            shot::Mode::Shot,
+            |dib| {
+                println!("[shot-now] captura concluída: {} bytes", dib.len());
+                let _ = slint::invoke_from_event_loop(|| {
+                    let _ = slint::quit_event_loop();
+                });
+            },
+            |text, source| println!("[shot-now] texto de {source}: {text:?}"),
+        );
+    });
+    let watchdog = Box::leak(Box::new(slint::Timer::default()));
+    watchdog.start(slint::TimerMode::Repeated, Duration::from_secs(60), || {
+        println!("[shot-now] tempo esgotado");
+        let _ = slint::quit_event_loop();
+    });
 }
 
 fn report_hotkeys(keys: win::Hotkeys) {
