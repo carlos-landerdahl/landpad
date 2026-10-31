@@ -19,11 +19,15 @@ pub fn dir() -> &'static Path {
     })
 }
 
-/// O histórico ainda não sobrevive ao fechar o app (isso chega com o SQLite na Fase 1),
-/// então as imagens da execução anterior não servem para nada.
-pub fn reset() {
-    let _ = std::fs::remove_dir_all(dir());
-    let _ = std::fs::create_dir_all(dir());
+/// O histórico vive só enquanto o app está aberto: apaga as imagens ao sair e,
+/// se o app foi encerrado à força, ao abrir de novo.
+pub fn clear() {
+    match std::fs::remove_dir_all(dir()) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            eprintln!("[imagem] não consegui apagar {}: {e}", dir().display())
+        }
+        _ => {}
+    }
 }
 
 pub fn hash(dib: &[u8]) -> u64 {

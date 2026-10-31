@@ -1,10 +1,20 @@
 import { LineEdit, ListView, Palette } from "std-widgets.slint";
+export { SettingsWindow } from "settings.slint";
 
 export struct ClipRow {
     text: string,
     meta: string,
     kind: string,
     thumb: image,
+    pinned: bool,
+}
+
+component PinGlyph inherits Text {
+    in property <bool> filled;
+    font-family: "Segoe Fluent Icons";
+    horizontal-alignment: center;
+    vertical-alignment: center;
+    text: filled ? "\u{E841}" : "\u{E718}";
 }
 
 component KindIcon inherits Text {
@@ -32,16 +42,29 @@ export component AppWindow inherits Window {
     in property <string> stats;
     // Prévia da imagem selecionada; vazia quando o item é texto.
     in property <image> preview;
+    in property <image> logo;
+    // O Rust resolve "seguir o Windows" para claro ou escuro.
+    in property <bool> dark-mode;
     in-out property <int> selected: 0;
+    in-out property <bool> only-pinned: false;
 
     callback query-edited(string);
     callback activate(int, bool);
+    callback toggle-pin(int);
+    callback pinned-filter(bool);
     callback selection-changed();
+    callback open-settings();
     callback dismiss();
     callback quit();
 
     changed selected => {
         root.selection-changed();
+    }
+    init => {
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark-mode => {
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
     }
 
     property <length> row-h: 30px;
@@ -60,9 +83,22 @@ export component AppWindow inherits Window {
 
     public function open() {
         search.text = "";
+        root.only-pinned = false;
         root.selected = 0;
         list.content-y = 0;
         search.focus();
+    }
+
+    // Seleciona e rola até a linha, como as setas fazem.
+    public function select(index: int) {
+        root.move(index - root.selected);
+    }
+
+    function toggle-filter() {
+        root.only-pinned = !root.only-pinned;
+        root.selected = 0;
+        list.content-y = 0;
+        root.pinned-filter(root.only-pinned);
     }
 
     function move(delta: int) {
@@ -111,6 +147,20 @@ export component AppWindow inherits Window {
                 }
                 return accept;
             }
+            if (event.text == Key.Tab || event.text == Key.Backtab) {
+                root.toggle-filter();
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "p" || event.text == "P")) {
+                if (root.selected < root.rows.length) {
+                    root.toggle-pin(root.selected);
+                }
+                return accept;
+            }
+            if (event.modifiers.control && event.text == ",") {
+                root.open-settings();
+                return accept;
+            }
             if (event.modifiers.control && (event.text == "q" || event.text == "Q")) {
                 root.quit();
                 return accept;
@@ -126,38 +176,71 @@ export component AppWindow inherits Window {
 
                 VerticalLayout {
                     alignment: center;
-                    Rectangle {
+                    Image {
                         width: 24px;
                         height: 24px;
-                        border-radius: 6px;
-                        background: @linear-gradient(135deg, #4a7bff 0%, #1c3fcf 100%);
-                        Path {
-                            width: parent.width;
-                            height: parent.height;
-                            viewbox-width: 64;
-                            viewbox-height: 64;
-                            commands: "M 27 16 L 27 40 L 44 40";
-                            stroke: #2ecdb4;
-                            stroke-width: 3.5px;
-                        }
-                        Path {
-                            width: parent.width;
-                            height: parent.height;
-                            viewbox-width: 64;
-                            viewbox-height: 64;
-                            commands: "M 20 23 L 20 47 L 37 47";
-                            stroke: white;
-                            stroke-width: 3.5px;
-                        }
+                        source: root.logo;
                     }
                 }
 
                 search := LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Buscar no histórico";
+                    placeholder-text: root.only-pinned ? "Buscar nos fixados" : "Buscar no histórico";
                     edited(text) => {
                         root.selected = 0;
                         root.query-edited(text);
+                    }
+                }
+
+                // Filtro de fixados: liga e desliga com clique ou Tab.
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 4px;
+                        background: root.only-pinned ? root.selected-bg : (filter-touch.has-hover ? root.hover-bg : transparent);
+
+                        PinGlyph {
+                            width: parent.width;
+                            height: parent.height;
+                            filled: root.only-pinned;
+                            font-size: 14px;
+                            color: root.only-pinned ? root.accent : root.muted;
+                        }
+
+                        filter-touch := TouchArea {
+                            clicked => {
+                                root.toggle-filter();
+                            }
+                        }
+                    }
+                }
+
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 4px;
+                        background: gear-touch.has-hover ? root.hover-bg : transparent;
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            text: "\u{E713}";
+                            font-family: "Segoe Fluent Icons";
+                            font-size: 14px;
+                            color: root.muted;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+
+                        gear-touch := TouchArea {
+                            clicked => {
+                                root.open-settings();
+                            }
+                        }
                     }
                 }
             }
@@ -183,7 +266,7 @@ export component AppWindow inherits Window {
                             width: parent.width - 8px;
                             height: parent.height - 2px;
                             border-radius: 4px;
-                            background: i == root.selected ? root.selected-bg : (touch.has-hover ? root.hover-bg : transparent);
+                            background: i == root.selected ? root.selected-bg : (touch.has-hover || pin-touch.has-hover ? root.hover-bg : transparent);
 
                             Rectangle {
                                 x: 0px;
@@ -197,7 +280,8 @@ export component AppWindow inherits Window {
 
                             HorizontalLayout {
                                 padding-left: 10px;
-                                padding-right: 10px;
+                                // Espaço do alfinete, que fica por cima para receber o clique.
+                                padding-right: 30px;
                                 spacing: 8px;
 
                                 Text {
@@ -259,6 +343,28 @@ export component AppWindow inherits Window {
                                     root.activate(i, false);
                                 }
                             }
+
+                            // Alfinete: sempre visível nos fixados; nos outros, só com o mouse em cima ou selecionado.
+                            Rectangle {
+                                x: parent.width - 28px;
+                                width: 24px;
+                                height: parent.height;
+                                property <bool> lit: row.pinned || touch.has-hover || pin-touch.has-hover || i == root.selected;
+
+                                PinGlyph {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    filled: row.pinned;
+                                    font-size: 12px;
+                                    color: !parent.lit ? transparent : row.pinned ? root.accent : pin-touch.has-hover ? Palette.foreground : root.muted;
+                                }
+
+                                pin-touch := TouchArea {
+                                    clicked => {
+                                        root.toggle-pin(i);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -266,7 +372,7 @@ export component AppWindow inherits Window {
                 if root.rows.length == 0: Text {
                     width: parent.width;
                     height: parent.height;
-                    text: "Nada por aqui ainda. Copie algo com Ctrl+C.";
+                    text: search.text != "" ? "Nada encontrado." : root.only-pinned ? "Nenhum item fixado. Ctrl+P fixa o item selecionado." : "Nada por aqui ainda. Copie algo com Ctrl+C.";
                     color: root.muted;
                     horizontal-alignment: center;
                     vertical-alignment: center;

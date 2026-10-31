@@ -1,0 +1,676 @@
+// Configurações do Landpad, no estilo do app Configurações do Windows 11: navegação à
+// esquerda, cartões à direita. Toda mudança vale na hora e é salva pelo Rust.
+import { Button, ComboBox, LineEdit, Palette, ScrollView, SpinBox, Switch } from "std-widgets.slint";
+
+component Glyph inherits Text {
+    font-family: "Segoe Fluent Icons";
+    horizontal-alignment: center;
+    vertical-alignment: center;
+}
+
+component NavItem inherits Rectangle {
+    in property <string> icon;
+    in property <string> label;
+    in property <bool> active;
+    in property <bool> dark;
+    in property <color> accent;
+    callback clicked();
+
+    height: 36px;
+    border-radius: 4px;
+    background: active ? (dark ? #ffffff0f : #0000000a) : touch.has-hover ? (dark ? #ffffff0a : #00000006) : transparent;
+
+    Rectangle {
+        x: 0px;
+        y: (parent.height - 16px) / 2;
+        width: 3px;
+        height: 16px;
+        border-radius: 1.5px;
+        background: root.accent;
+        visible: root.active;
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        spacing: 12px;
+        Glyph {
+            width: 16px;
+            text: root.icon;
+            font-size: 15px;
+            color: Palette.foreground;
+        }
+        Text {
+            text: root.label;
+            vertical-alignment: center;
+            color: Palette.foreground;
+        }
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component Card inherits Rectangle {
+    in property <bool> dark;
+    background: dark ? #ffffff0d : #ffffffcc;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: dark ? #ffffff0f : #0000000f;
+}
+
+// Uma linha de configuração: título e descrição à esquerda, o controle à direita.
+component Row inherits Card {
+    in property <string> title;
+    in property <string> description;
+    in property <color> description-color;
+
+    min-height: 68px;
+    HorizontalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 16px;
+
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                text: root.title;
+                color: Palette.foreground;
+                wrap: word-wrap;
+            }
+            if root.description != "": Text {
+                text: root.description;
+                font-size: 12px;
+                color: root.description-color;
+                wrap: word-wrap;
+            }
+        }
+
+        @children
+    }
+}
+
+// O atalho atual numa "tecla" e o botão para gravar outro.
+component HotkeyEditor inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> recording;
+    in property <bool> enabled: true;
+    in property <color> accent;
+    callback change();
+    callback cancel();
+
+    spacing: 8px;
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            height: 30px;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: root.recording ? root.accent : Palette.border;
+            background: Palette.control-background;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                Text {
+                    text: root.label;
+                    min-width: 86px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: 13px;
+                    color: root.recording ? root.accent : Palette.foreground;
+                }
+            }
+        }
+    }
+    VerticalLayout {
+        alignment: center;
+        Button {
+            text: root.recording ? "Cancelar" : "Alterar";
+            enabled: root.recording || root.enabled;
+            clicked => {
+                if (root.recording) {
+                    root.cancel();
+                } else {
+                    root.change();
+                }
+            }
+        }
+    }
+}
+
+component KeyLine inherits HorizontalLayout {
+    in property <string> key;
+    in property <string> action;
+    in property <color> muted;
+    spacing: 12px;
+    Text {
+        width: 90px;
+        text: root.key;
+        font-size: 13px;
+        font-weight: 600;
+        color: Palette.foreground;
+    }
+    Text {
+        text: root.action;
+        font-size: 13px;
+        color: root.muted;
+    }
+}
+
+export component SettingsWindow inherits Window {
+    // O ícone da janela é posto pelo Rust (WM_SETICON), nos tamanhos que a barra de tarefas pede.
+    title: "Configurações do Landpad";
+    preferred-width: 800px;
+    preferred-height: 580px;
+    min-width: 660px;
+    min-height: 460px;
+    background: Palette.background;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 14px;
+
+    in property <image> logo;
+    in property <image> logo-large;
+    // O Rust resolve "seguir o Windows" para claro ou escuro.
+    in property <bool> dark-mode;
+    in property <string> version;
+    in-out property <int> page: 0;
+
+    in-out property <bool> start-with-windows;
+    in-out property <int> theme-index;
+    in-out property <int> position-index;
+    in property <string> popup-hotkey;
+    in property <string> shot-hotkey;
+    in property <string> popup-status;
+    in property <string> shot-status;
+    // 0: nada sendo gravado; 1: atalho do histórico; 2: atalho da captura.
+    in-out property <int> recording;
+    in property <string> record-hint: "Aperte o atalho…";
+    in-out property <bool> quick-paste;
+    in-out property <bool> paused;
+    in property <[string]> ignored-apps;
+    in-out property <int> max-items;
+    in-out property <bool> keep-images;
+    in property <string> history-status;
+
+    // Qualquer preferência mudou: o Rust lê todas, aplica e salva.
+    callback edited();
+    callback autostart-toggled(bool);
+    callback record(int);
+    callback cancel-record();
+    callback add-app(string);
+    callback remove-app(int);
+    callback clear-history();
+
+    init => {
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+    changed dark-mode => {
+        Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
+    }
+
+    property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    property <color> accent: dark ? #8ca9ff : #2e63ff;
+    property <color> muted: dark ? #c5c5c5 : #5c5c5c;
+    property <color> warning: dark ? #fce100 : #9d5d00;
+    property <string> page-title: page == 0 ? "Geral" : page == 1 ? "Atalhos" : page == 2 ? "Privacidade" : page == 3 ? "Histórico" : "Sobre";
+
+    HorizontalLayout {
+        VerticalLayout {
+            width: 240px;
+            padding: 12px;
+            padding-top: 18px;
+            spacing: 4px;
+
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-bottom: 18px;
+                spacing: 12px;
+                Image {
+                    source: root.logo;
+                    width: 32px;
+                    height: 32px;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Text {
+                        text: "Landpad";
+                        font-size: 15px;
+                        font-weight: 600;
+                        color: Palette.foreground;
+                    }
+                    Text {
+                        text: "Configurações";
+                        font-size: 12px;
+                        color: root.muted;
+                    }
+                }
+            }
+
+            NavItem {
+                icon: "\u{E713}";
+                label: "Geral";
+                active: root.page == 0;
+                dark: root.dark;
+                accent: root.accent;
+                clicked => {
+                    root.page = 0;
+                }
+            }
+            NavItem {
+                icon: "\u{E765}";
+                label: "Atalhos";
+                active: root.page == 1;
+                dark: root.dark;
+                accent: root.accent;
+                clicked => {
+                    root.page = 1;
+                }
+            }
+            NavItem {
+                icon: "\u{E72E}";
+                label: "Privacidade";
+                active: root.page == 2;
+                dark: root.dark;
+                accent: root.accent;
+                clicked => {
+                    root.page = 2;
+                }
+            }
+            NavItem {
+                icon: "\u{E81C}";
+                label: "Histórico";
+                active: root.page == 3;
+                dark: root.dark;
+                accent: root.accent;
+                clicked => {
+                    root.page = 3;
+                }
+            }
+            NavItem {
+                icon: "\u{E946}";
+                label: "Sobre";
+                active: root.page == 4;
+                dark: root.dark;
+                accent: root.accent;
+                clicked => {
+                    root.page = 4;
+                }
+            }
+            Rectangle {
+                vertical-stretch: 1;
+            }
+        }
+
+        scroll := ScrollView {
+            VerticalLayout {
+                width: scroll.visible-width;
+                padding-top: 18px;
+                padding-left: 8px;
+                padding-right: 28px;
+                padding-bottom: 24px;
+                spacing: 6px;
+                alignment: start;
+
+                Text {
+                    text: root.page-title;
+                    font-size: 26px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                }
+                Rectangle {
+                    height: 12px;
+                }
+
+                if root.page == 0: VerticalLayout {
+                    spacing: 6px;
+                    Row {
+                        dark: root.dark;
+                        title: "Iniciar com o Windows";
+                        description: "Fica na bandeja, sem janela aberta.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.start-with-windows;
+                                toggled => {
+                                    root.autostart-toggled(self.checked);
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Tema";
+                        description: "Vale para o histórico e para esta janela.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            ComboBox {
+                                width: 210px;
+                                model: ["Seguir o Windows", "Claro", "Escuro"];
+                                current-index <=> root.theme-index;
+                                selected => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Onde o histórico abre";
+                        description: "No cursor de texto ele aparece colado ao que você está escrevendo.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            ComboBox {
+                                width: 210px;
+                                model: ["No cursor de texto", "No ponteiro do mouse", "No centro da tela"];
+                                current-index <=> root.position-index;
+                                selected => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == 1: VerticalLayout {
+                    spacing: 6px;
+                    Row {
+                        dark: root.dark;
+                        title: "Abrir o histórico";
+                        description: root.popup-status != "" ? root.popup-status : "Funciona em qualquer app.";
+                        description-color: root.popup-status != "" ? root.warning : root.muted;
+                        HotkeyEditor {
+                            label: root.recording == 1 ? root.record-hint : root.popup-hotkey;
+                            recording: root.recording == 1;
+                            enabled: root.recording == 0;
+                            accent: root.accent;
+                            change => {
+                                root.recording = 1;
+                                root.record(1);
+                            }
+                            cancel => {
+                                root.cancel-record();
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Capturar a tela";
+                        description: root.shot-status != "" ? root.shot-status : "Congela a tela para você recortar e anotar.";
+                        description-color: root.shot-status != "" ? root.warning : root.muted;
+                        HotkeyEditor {
+                            label: root.recording == 2 ? root.record-hint : root.shot-hotkey;
+                            recording: root.recording == 2;
+                            enabled: root.recording == 0;
+                            accent: root.accent;
+                            change => {
+                                root.recording = 2;
+                                root.record(2);
+                            }
+                            cancel => {
+                                root.cancel-record();
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Colar pelo número";
+                        description: "Com o histórico aberto, Ctrl+Shift+1 a 9 colam o item daquela posição.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.quick-paste;
+                                toggled => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Card {
+                        dark: root.dark;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 8px;
+                            Text {
+                                text: "Com o histórico aberto";
+                                color: Palette.foreground;
+                            }
+                            KeyLine {
+                                key: "Enter";
+                                action: "Cola o item selecionado";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Ctrl+P";
+                                action: "Fixa ou solta o item no topo";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Tab";
+                                action: "Mostra só os fixados";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Esc";
+                                action: "Limpa a busca ou fecha";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Ctrl+,";
+                                action: "Abre estas configurações";
+                                muted: root.muted;
+                            }
+                        }
+                    }
+                }
+
+                if root.page == 2: VerticalLayout {
+                    spacing: 6px;
+                    Row {
+                        dark: root.dark;
+                        title: "Pausar a captura";
+                        description: "Nada novo entra no histórico até você retomar. Também pelo ícone da bandeja.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.paused;
+                                toggled => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Cópias de senha";
+                        description: "Gerenciadores de senha avisam o Windows quando copiam uma senha. Essas cópias nunca entram no histórico.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: "Sempre";
+                                color: root.muted;
+                            }
+                        }
+                    }
+                    Card {
+                        dark: root.dark;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 10px;
+                            VerticalLayout {
+                                spacing: 2px;
+                                Text {
+                                    text: "Nunca guardar cópias destes apps";
+                                    color: Palette.foreground;
+                                }
+                                Text {
+                                    text: "Use o nome do programa como aparece no histórico, por exemplo KeePassXC ou chrome.";
+                                    font-size: 12px;
+                                    color: root.muted;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            for app[i] in root.ignored-apps: HorizontalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: app;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    color: Palette.foreground;
+                                }
+                                Button {
+                                    text: "Remover";
+                                    clicked => {
+                                        root.remove-app(i);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                new-app := LineEdit {
+                                    placeholder-text: "Nome do app";
+                                    accepted(text) => {
+                                        root.add-app(text);
+                                        self.text = "";
+                                    }
+                                }
+                                Button {
+                                    text: "Adicionar";
+                                    clicked => {
+                                        root.add-app(new-app.text);
+                                        new-app.text = "";
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == 3: VerticalLayout {
+                    spacing: 6px;
+                    Row {
+                        dark: root.dark;
+                        title: "Guardar no máximo";
+                        description: "Itens fixados não contam. Os mais antigos saem primeiro.";
+                        description-color: root.muted;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                SpinBox {
+                                    width: 130px;
+                                    minimum: 50;
+                                    maximum: 5000;
+                                    value <=> root.max-items;
+                                    edited => {
+                                        root.edited();
+                                    }
+                                }
+                            }
+                            Text {
+                                text: "itens";
+                                vertical-alignment: center;
+                                color: root.muted;
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Guardar imagens";
+                        description: "Prints e imagens copiadas. O original fica em disco só enquanto o Landpad está aberto.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.keep-images;
+                                toggled => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Limpar histórico";
+                        description: root.history-status;
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Limpar";
+                                clicked => {
+                                    root.clear-history();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.page == 4: VerticalLayout {
+                    spacing: 6px;
+                    Card {
+                        dark: root.dark;
+                        HorizontalLayout {
+                            padding: 20px;
+                            spacing: 16px;
+                            Image {
+                                source: root.logo-large;
+                                width: 56px;
+                                height: 56px;
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: "Landpad";
+                                    font-size: 18px;
+                                    font-weight: 600;
+                                    color: Palette.foreground;
+                                }
+                                Text {
+                                    text: "Versão " + root.version;
+                                    font-size: 13px;
+                                    color: root.muted;
+                                }
+                                Text {
+                                    text: "Suas cópias pousam aqui.";
+                                    font-size: 13px;
+                                    color: root.muted;
+                                }
+                            }
+                        }
+                    }
+                    Card {
+                        dark: root.dark;
+                        VerticalLayout {
+                            padding: 18px;
+                            spacing: 6px;
+                            Text {
+                                text: "Feito em Rust, com Slint na interface. Um executável só, sem serviços extras, e nada do que você copia sai do seu computador.";
+                                font-size: 13px;
+                                color: Palette.foreground;
+                                wrap: word-wrap;
+                            }
+                            Text {
+                                text: "github.com/carlos-landerdahl/landpad";
+                                font-size: 13px;
+                                color: root.accent;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

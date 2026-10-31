@@ -1,9 +1,16 @@
-//! Landpad — spike da Fase 0.
+//! Landpad — gerenciador de área de transferência para Windows.
 //!
-//! Mede quanto a janela Slint pesa parada na memória e quanto demora para
-//! abrir pelo atalho global. A janela nasce oculta e só aparece no atalho.
+//! Fica na bandeja; o popup do histórico nasce oculto e só aparece no atalho. A janela
+//! de configurações e a captura de tela existem só enquanto estão abertas.
 
+// Sem janela de console ao iniciar com o Windows; aberto de um terminal, os logs vão para ele.
+#![windows_subsystem = "windows"]
+
+mod config;
 mod images;
+mod logo;
+mod settings;
+mod shot;
 mod win;
 
 use std::cell::{Cell, RefCell};
@@ -13,9 +20,10 @@ use std::time::{Duration, Instant};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
+use config::Config;
+
 slint::include_modules!();
 
-const MAX_CLIPS: usize = 500;
 const MAX_ROWS: usize = 200;
 /// Miniatura da linha e área da prévia, em pixels lógicos; precisam bater com o app.slint.
 const THUMB_SIZE: (f32, f32) = (36.0, 22.0);
@@ -39,6 +47,9 @@ struct Clip {
     content: Content,
     app: String,
     copied: Instant,
+    /// Ordem em que foi fixado; fixados ficam no topo, o mais recente primeiro,
+    /// e não contam no limite do histórico.
+    pinned: Option<u64>,
 }
 
 impl Content {
@@ -58,6 +69,13 @@ struct State {
     shown: Vec<usize>,
     model: Rc<VecModel<ClipRow>>,
     target: win::Target,
+    only_pinned: bool,
+    pin_seq: u64,
+    config: Config,
+    /// Pausa vale só até fechar o app; não vai para o arquivo de preferências.
+    paused: bool,
+    /// Atalhos que o Windows aceitou de fato.
+    hotkeys: win::Hotkeys,
 }
 
 thread_local! {
@@ -76,10 +94,28 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
-    images::reset();
+    win::attach_console();
+    let flag = |name: &str| std::env::args().any(|a| a == name);
+    if flag("--shot-test") {
+        shot::self_test();
+        return Ok(());
+    }
+    // Os modos de teste rodam ao lado do app de verdade.
+    let testing = flag("--bench") || flag("--settings-test");
+    if !testing && !win::first_instance() {
+        eprintln!("O Landpad já está aberto: procure o ícone na bandeja.");
+        return Ok(());
+    }
+    // Sobra de uma execução encerrada à força.
+    images::clear();
+    let config = Config::load();
     let ui = AppWindow::new()?;
+    ui.set_logo(logo_image(24.0, win::scale()));
+    ui.set_dark_mode(config.dark());
     let model = Rc::new(VecModel::<ClipRow>::default());
     ui.set_rows(ModelRc::from(model.clone()));
+    win::set_capture_rules(false, config.keep_images, &config.ignored_apps);
+    let (popup_key, shot_key) = (config.popup_hotkey, config.shot_hotkey);
     STATE.with(|s| {
         *s.borrow_mut() = Some(State {
             ui: ui.as_weak(),
@@ -88,9 +124,24 @@ fn main() -> Result<(), slint::PlatformError> {
             shown: Vec::new(),
             model,
             target: win::Target::default(),
+            only_pinned: false,
+            pin_seq: 0,
+            config,
+            paused: false,
+            hotkeys: win::Hotkeys::default(),
         });
     });
     with_state(refresh);
+
+    let weak = ui.as_weak();
+    ui.on_open_settings(move || {
+        // Abre antes de esconder o popup: enquanto o popup tem o foco, o Windows deixa a
+        // janela nova vir para a frente.
+        settings::open();
+        if let Some(ui) = weak.upgrade() {
+            hide(&ui);
+        }
+    });
 
     ui.on_query_edited(|query| {
         with_state(|st| {
@@ -101,6 +152,23 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     ui.on_selection_changed(|| with_state(update_preview));
+
+    ui.on_pinned_filter(|only_pinned| {
+        with_state(|st| {
+            st.only_pinned = only_pinned;
+            refresh(st);
+            update_preview(st);
+        })
+    });
+
+    let weak = ui.as_weak();
+    ui.on_toggle_pin(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        let Some(next) = with_state(|st| toggle_pin(st, index as usize)) else { return };
+        // Fora do with_state: mudar a seleção dispara selection-changed, que usa o estado.
+        ui.invoke_select(next as i32);
+        with_state(update_preview);
+    });
 
     let weak = ui.as_weak();
     ui.on_activate(move |index, _plain| {
@@ -157,7 +225,9 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let on_hotkey = ui.as_weak();
     let on_foreground = ui.as_weak();
-    let hotkey = win::start(win::Handlers {
+    let on_quick = ui.as_weak();
+    let on_tray = ui.as_weak();
+    let handlers = win::Handlers {
         on_clip: Box::new(|captured, app| match captured {
             win::Captured::Text(text) => {
                 let _ = slint::invoke_from_event_loop(move || add_clip(Content::Text(text), app));
@@ -179,27 +249,123 @@ fn main() -> Result<(), slint::PlatformError> {
             let weak = on_foreground.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
-                    if ui.window().is_visible() && hwnd_of(&ui) != Some(hwnd) {
+                    if ui.window().is_visible() && hwnd_of(ui.window()) != Some(hwnd) {
                         hide(&ui);
                     }
                 }
             });
         }),
-    });
-
-    match hotkey {
-        Ok(Some(label)) => println!("Landpad rodando. {label} abre o histórico; Ctrl+Q no popup encerra."),
-        Ok(None) => println!("Landpad rodando, mas nenhum atalho global estava livre."),
+        on_quick: Box::new(move |n| {
+            let weak = on_quick.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                if ui.window().is_visible() && n < with_state(|st| st.shown.len()) {
+                    ui.invoke_activate(n as i32, false);
+                }
+            });
+        }),
+        on_shot: Box::new(start_shot),
+        on_tray: Box::new(move |command| {
+            let weak = on_tray.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                match command {
+                    win::TrayCommand::Open => toggle(&ui, Instant::now(), win::last_app()),
+                    win::TrayCommand::Shot => start_shot(),
+                    win::TrayCommand::Pause => {
+                        with_state(|st| {
+                            st.paused = !st.paused;
+                            let config = st.config.clone();
+                            apply_config(st, config);
+                        });
+                        settings::sync();
+                    }
+                    win::TrayCommand::Settings => settings::open(),
+                    win::TrayCommand::Quit => {
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+            });
+        }),
+        on_hotkeys: Box::new(|keys| {
+            let _ = slint::invoke_from_event_loop(move || {
+                with_state(|st| st.hotkeys = keys);
+                report_hotkeys(keys);
+                settings::sync();
+            });
+        }),
+        on_theme: Box::new(|| {
+            let _ = slint::invoke_from_event_loop(|| {
+                with_state(|st| {
+                    let config = st.config.clone();
+                    apply_config(st, config);
+                });
+                settings::sync();
+            });
+        }),
+    };
+    let options = win::Options { tray: !testing, hotkeys: !testing };
+    match win::start(handlers, options, popup_key, shot_key) {
+        Ok(keys) => {
+            with_state(|st| st.hotkeys = keys);
+            report_hotkeys(keys);
+        }
         Err(e) => eprintln!("Falha ao ligar o Landpad ao Windows: {e}"),
     }
     let (private, working) = win::memory_mb();
     println!("[memória] parado, sem janela: {private:.1} MB privados · {working:.1} MB working set");
 
-    if std::env::args().any(|a| a == "--bench") {
+    if flag("--bench") {
         start_bench(&ui);
     }
+    if flag("--settings-test") {
+        settings::self_test();
+    }
 
-    slint::run_event_loop_until_quit()
+    let result = slint::run_event_loop_until_quit();
+    win::shutdown();
+    // O histórico vive só enquanto o app está aberto, imagens inclusive.
+    images::clear();
+    result
+}
+
+fn start_shot() {
+    shot::open(|dib| store_image(dib, None, "captura".into()));
+}
+
+fn report_hotkeys(keys: win::Hotkeys) {
+    let label = |k: Option<win::Hotkey>, action: &str, what: &str| match k {
+        Some(k) => format!("{} {action}", k.label()),
+        None => format!("sem atalho para {what}"),
+    };
+    println!(
+        "Landpad rodando. {}, {}; o ícone na bandeja tem o resto.",
+        label(keys.popup, "abre o histórico", "o histórico"),
+        label(keys.shot, "captura a tela", "a captura")
+    );
+}
+
+/// Aplica as preferências em tudo que já está aberto e salva se mudaram.
+/// Atalhos ficam de fora: quem muda um atalho pede o registro (ver settings.rs).
+fn apply_config(st: &mut State, new: Config) {
+    let changed = new != st.config;
+    st.config = new;
+    win::set_capture_rules(st.paused, st.config.keep_images, &st.config.ignored_apps);
+    if let Some(ui) = st.ui.upgrade() {
+        ui.set_dark_mode(st.config.dark());
+    }
+    evict(st);
+    refresh(st);
+    if changed {
+        st.config.save();
+    }
+}
+
+/// O logo no tamanho exato dos pixels da tela, para não ser reamostrado na hora de pintar.
+fn logo_image(logical: f32, scale: f32) -> slint::Image {
+    let size = (logical * scale).round().max(16.0) as u32;
+    let rgba = logo::rgba(size, false);
+    slint::Image::from_rgba8(SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&rgba, size, size))
 }
 
 fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
@@ -207,14 +373,16 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
         hide(ui);
         return;
     }
-    with_state(|st| {
+    let (position, quick_paste) = with_state(|st| {
         st.target = target;
         st.query.clear();
+        st.only_pinned = false;
         refresh(st);
+        (st.config.position, st.config.quick_paste)
     });
 
     let scale = ui.window().scale_factor();
-    let (x, y) = win::popup_origin((400.0 * scale) as i32, (440.0 * scale) as i32);
+    let (x, y) = win::popup_origin((400.0 * scale) as i32, (440.0 * scale) as i32, position);
     ui.window().set_position(slint::PhysicalPosition::new(x, y));
 
     OPENED_AT.with(|c| c.set(Some(t0)));
@@ -222,8 +390,11 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
         eprintln!("não consegui abrir a janela: {e}");
         return;
     }
-    if let Some(hwnd) = hwnd_of(ui) {
-        win::prepare_popup(hwnd, !BENCH.with(Cell::get));
+    let bench = BENCH.with(Cell::get);
+    with_hwnd(ui, move |hwnd| win::prepare_popup(hwnd, !bench));
+    // No bench o popup não tem foco: Ctrl+Shift+número iria colar no app que você está usando.
+    if !bench && quick_paste {
+        win::quick_keys(true);
     }
     ui.invoke_open();
     with_state(update_preview);
@@ -237,6 +408,7 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
 
 fn hide(ui: &AppWindow) {
     let _ = ui.hide();
+    win::quick_keys(false);
     clear_preview(ui);
     let (private, working) = win::memory_mb();
     println!("[memória] janela oculta: {private:.1} MB privados · {working:.1} MB working set");
@@ -251,8 +423,8 @@ fn report_open(ui: &AppWindow, ms: f64, how: &str) {
     TIMINGS.with(|t| t.borrow_mut().push(ms));
 }
 
-/// `--bench`: enche o histórico com 300 textos e 2 imagens e abre/fecha o popup sozinho,
-/// para medir sem depender do atalho. Não rouba o foco do app em uso.
+/// `--bench`: enche o histórico com 300 textos (2 fixados) e 2 imagens e abre/fecha o
+/// popup sozinho, para medir sem depender do atalho. Não rouba o foco do app em uso.
 fn start_bench(ui: &AppWindow) {
     BENCH.with(|c| c.set(true));
     for i in 0..300 {
@@ -264,6 +436,13 @@ fn start_bench(ui: &AppWindow) {
         };
         add_clip(Content::Text(text), "bench".into());
     }
+    with_state(|st| {
+        for k in [7, 2] {
+            st.pin_seq += 1;
+            st.clips[k].pinned = Some(st.pin_seq);
+        }
+        refresh(st);
+    });
     for (seed, (w, h)) in [(1920, 1080), (1280, 960)].into_iter().enumerate() {
         let dib = sample_dib(w, h, seed as u32);
         std::thread::spawn(move || store_image(dib, None, "bench".into()));
@@ -279,9 +458,15 @@ fn start_bench(ui: &AppWindow) {
         if n < 20 {
             if n % 2 == 0 {
                 toggle(&ui, Instant::now(), win::Target::default());
+                if n == 8 {
+                    ui.set_only_pinned(true);
+                    ui.invoke_pinned_filter(true);
+                }
             } else {
-                if n == 5 {
-                    save_snapshot(&ui, "target/popup.bmp");
+                match n {
+                    5 => save_snapshot(ui.window(), "target/popup.bmp"),
+                    9 => save_snapshot(ui.window(), "target/popup-fixados.bmp"),
+                    _ => {}
                 }
                 hide(&ui);
             }
@@ -312,12 +497,12 @@ fn sample_dib(width: u32, height: u32, seed: u32) -> Vec<u8> {
     dib
 }
 
-/// Salva o popup como BMP de 32 bits, para conferir o visual sem olhar a tela.
-fn save_snapshot(ui: &AppWindow, path: &str) {
-    let buf = match ui.window().take_snapshot() {
+/// Salva uma janela como BMP de 32 bits, para conferir o visual sem olhar a tela.
+fn save_snapshot(window: &slint::Window, path: &str) {
+    let buf = match window.take_snapshot() {
         Ok(buf) => buf,
         Err(e) => {
-            eprintln!("[bench] não consegui capturar o popup: {e}");
+            eprintln!("[teste] não consegui capturar a janela: {e}");
             return;
         }
     };
@@ -343,8 +528,8 @@ fn save_snapshot(ui: &AppWindow, path: &str) {
         out.extend_from_slice(&[p.b, p.g, p.r, p.a]);
     }
     match std::fs::write(path, out) {
-        Ok(()) => println!("[bench] print do popup salvo em {path}"),
-        Err(e) => eprintln!("[bench] não consegui salvar {path}: {e}"),
+        Ok(()) => println!("[teste] print salvo em {path}"),
+        Err(e) => eprintln!("[teste] não consegui salvar {path}: {e}"),
     }
 }
 
@@ -396,37 +581,81 @@ fn store_image(dib: Vec<u8>, png: Option<Vec<u8>>, app: String) {
 
 fn add_clip(content: Content, app: String) {
     with_state(|st| {
-        if let Some(pos) = st.clips.iter().position(|c| c.content.same(&content)) {
-            st.clips.remove(pos);
-        }
-        st.clips.insert(0, Clip { content, app, copied: Instant::now() });
-        if st.clips.len() > MAX_CLIPS {
-            for old in st.clips.drain(MAX_CLIPS..) {
-                if let Content::Image(p) = old.content {
-                    images::remove(p.hash);
-                }
-            }
-        }
+        // Copiar de novo um item fixado não o desafixa.
+        let pinned = st
+            .clips
+            .iter()
+            .position(|c| c.content.same(&content))
+            .and_then(|pos| st.clips.remove(pos).pinned);
+        st.clips.insert(0, Clip { content, app, copied: Instant::now(), pinned });
+        evict(st);
         refresh(st);
     });
 }
 
+/// Tira os itens mais antigos além do limite; fixados não contam e nunca saem.
+fn evict(st: &mut State) {
+    let max = st.config.max_items;
+    let mut kept = 0;
+    let (keep, dropped): (Vec<Clip>, Vec<Clip>) = std::mem::take(&mut st.clips).into_iter().partition(|c| {
+        kept += usize::from(c.pinned.is_none());
+        c.pinned.is_some() || kept <= max
+    });
+    st.clips = keep;
+    forget(dropped);
+}
+
+/// Apaga do disco as imagens dos itens que saíram do histórico.
+fn forget(clips: Vec<Clip>) {
+    for old in clips {
+        if let Content::Image(p) = old.content {
+            images::remove(p.hash);
+        }
+    }
+}
+
+/// "Limpar histórico" das configurações: tudo menos os fixados.
+fn clear_history(st: &mut State) {
+    let (keep, dropped): (Vec<Clip>, Vec<Clip>) = std::mem::take(&mut st.clips).into_iter().partition(|c| c.pinned.is_some());
+    st.clips = keep;
+    println!("[histórico] {} itens apagados; {} fixados mantidos", dropped.len(), st.clips.len());
+    forget(dropped);
+    refresh(st);
+}
+
+/// Fixa ou desafixa o item `index` da lista e devolve onde ele (ou o vizinho) foi parar,
+/// para a seleção acompanhar.
+fn toggle_pin(st: &mut State, index: usize) -> Option<usize> {
+    let k = *st.shown.get(index)?;
+    st.clips[k].pinned = match st.clips[k].pinned {
+        Some(_) => None,
+        None => {
+            st.pin_seq += 1;
+            Some(st.pin_seq)
+        }
+    };
+    refresh(st);
+    let next = st.shown.iter().position(|&i| i == k).unwrap_or(index);
+    Some(next.min(st.shown.len().saturating_sub(1)))
+}
+
 fn refresh(st: &mut State) {
     let query = fold(&st.query);
-    st.shown = st
-        .clips
-        .iter()
-        .enumerate()
-        .filter(|(_, c)| {
-            let haystack = match &c.content {
-                Content::Text(text) => fold(text),
-                Content::Image(p) => fold(&image_label(p)),
-            };
-            query.is_empty() || haystack.contains(&query) || fold(&c.app).contains(&query)
-        })
-        .map(|(i, _)| i)
-        .take(MAX_ROWS)
-        .collect();
+    let clips = &st.clips;
+    let matches = |c: &Clip| {
+        if st.only_pinned && c.pinned.is_none() {
+            return false;
+        }
+        let haystack = match &c.content {
+            Content::Text(text) => fold(text),
+            Content::Image(p) => fold(&image_label(p)),
+        };
+        query.is_empty() || haystack.contains(&query) || fold(&c.app).contains(&query)
+    };
+    let mut pinned: Vec<usize> = (0..clips.len()).filter(|&i| clips[i].pinned.is_some() && matches(&clips[i])).collect();
+    pinned.sort_by_key(|&i| std::cmp::Reverse(clips[i].pinned));
+    let recent = (0..clips.len()).filter(|&i| clips[i].pinned.is_none() && matches(&clips[i]));
+    st.shown = pinned.into_iter().chain(recent).take(MAX_ROWS).collect();
 
     let now = Instant::now();
     let rows: Vec<ClipRow> = st
@@ -443,6 +672,7 @@ fn refresh(st: &mut State) {
                 meta: format!("{} · {}", clip.app, ago(now.duration_since(clip.copied))).into(),
                 kind: kind.into(),
                 thumb,
+                pinned: clip.pinned.is_some(),
             }
         })
         .collect();
@@ -450,10 +680,13 @@ fn refresh(st: &mut State) {
 
     if let Some(ui) = st.ui.upgrade() {
         let total = st.clips.len();
-        let footer = if query.is_empty() {
-            format!("{total} itens · Enter cola · Esc fecha")
-        } else {
+        let footer = if !query.is_empty() {
             format!("{} de {total} itens", st.shown.len())
+        } else if st.only_pinned {
+            let n = st.shown.len();
+            format!("{n} {} · Tab mostra todos", if n == 1 { "fixado" } else { "fixados" })
+        } else {
+            format!("{total} itens · Ctrl+P fixa · Tab filtra")
         };
         ui.set_footer(footer.into());
     }
@@ -512,12 +745,32 @@ fn image_label(p: &Picture) -> String {
     format!("Imagem {} × {}", p.width, p.height)
 }
 
-fn hwnd_of(ui: &AppWindow) -> Option<isize> {
-    let handle = ui.window().window_handle();
+fn hwnd_of(window: &slint::Window) -> Option<isize> {
+    let handle = window.window_handle();
     match handle.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
         _ => None,
     }
+}
+
+/// Chama `f` com o HWND da janela assim que ele existir. Na primeira vez que uma janela
+/// é mostrada, o Slint só cria a janela nativa depois do show(), no laço de eventos.
+fn with_hwnd<C: ComponentHandle + 'static>(component: &C, f: impl FnOnce(isize) + 'static) {
+    match hwnd_of(component.window()) {
+        Some(hwnd) => f(hwnd),
+        None => wait_for_hwnd(component.as_weak(), Box::new(f), Instant::now()),
+    }
+}
+
+fn wait_for_hwnd<C: ComponentHandle + 'static>(weak: slint::Weak<C>, f: Box<dyn FnOnce(isize)>, since: Instant) {
+    slint::Timer::single_shot(Duration::from_millis(10), move || {
+        let Some(component) = weak.upgrade() else { return };
+        match hwnd_of(component.window()) {
+            Some(hwnd) => f(hwnd),
+            None if since.elapsed() < Duration::from_secs(2) => wait_for_hwnd(weak, f, since),
+            None => eprintln!("[janela] o Windows não criou a janela a tempo"),
+        }
+    });
 }
 
 /// Minúsculas e sem acento, para "cotacao" achar "cotação".
