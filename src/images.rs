@@ -23,9 +23,8 @@ pub fn use_test_dir() {
 pub fn dir() -> &'static Path {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
     DIR.get_or_init(|| {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
         let name = if TESTING.load(Ordering::Acquire) { "imagens-teste" } else { "imagens" };
-        base.join("Landpad").join(name)
+        crate::config::local_dir().join(name)
     })
 }
 

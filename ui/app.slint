@@ -4,19 +4,43 @@ export { SettingsWindow } from "settings.slint";
 export struct ClipRow {
     text: string,
     meta: string,
+    // text, link, code, image, color, email, phone, doc (CPF/CNPJ), path, json.
     kind: string,
     thumb: image,
     // Cor do item, quando o texto é um código de cor (#2E63FF, rgb(…)).
     swatch: color,
     pinned: bool,
+    // Nome dado a um fixado; vazio nos demais.
+    name: string,
 }
 
-component PinGlyph inherits Text {
+// Alfinete. O glifo cheio da fonte (E841) é só a cabeça, sem a agulha; o contorno (E718)
+// por cima devolve a ponta e deixa o fixado com o mesmo desenho do solto.
+component PinGlyph {
     in property <bool> filled;
-    font-family: "Segoe Fluent Icons";
-    horizontal-alignment: center;
-    vertical-alignment: center;
-    text: filled ? "\u{E841}" : "\u{E718}";
+    in property <length> font-size: 14px;
+    in property <color> color;
+
+    if root.filled: Text {
+        width: parent.width;
+        height: parent.height;
+        font-family: "Segoe Fluent Icons";
+        font-size: root.font-size;
+        color: root.color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: "\u{E841}";
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        font-family: "Segoe Fluent Icons";
+        font-size: root.font-size;
+        color: root.color;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        text: "\u{E718}";
+    }
 }
 
 component KindIcon inherits Text {
@@ -26,7 +50,14 @@ component KindIcon inherits Text {
     font-size: 14px;
     horizontal-alignment: center;
     vertical-alignment: center;
-    text: kind == "link" ? "\u{E71B}" : kind == "code" ? "\u{E943}" : kind == "image" ? "\u{E91B}" : "\u{E8C8}";
+    text: kind == "link" ? "\u{E71B}"
+        : kind == "code" || kind == "json" ? "\u{E943}"
+        : kind == "image" ? "\u{E91B}"
+        : kind == "email" ? "\u{E715}"
+        : kind == "phone" ? "\u{E717}"
+        : kind == "doc" ? "\u{E8A5}"
+        : kind == "path" ? "\u{E8B7}"
+        : "\u{E8C8}";
 }
 
 export component AppWindow inherits Window {
@@ -43,15 +74,37 @@ export component AppWindow inherits Window {
     in property <string> footer;
     // Prévia da imagem selecionada; vazia quando o item é texto.
     in property <image> preview;
+    // Prévia de texto longo ou com várias linhas; vazia quando não há o que mostrar.
+    in property <string> preview-text;
+    in property <bool> preview-mono;
     in property <image> logo;
     // O Rust resolve "seguir o Windows" para claro ou escuro.
     in property <bool> dark-mode;
     in-out property <int> selected: 0;
+    // Shift+setas estende a seleção a partir daqui; -1 quando só uma linha está selecionada.
+    in-out property <int> anchor: -1;
+    property <int> sel-lo: root.anchor < 0 ? root.selected : min(root.anchor, root.selected);
+    property <int> sel-hi: root.anchor < 0 ? root.selected : max(root.anchor, root.selected);
     in-out property <bool> only-pinned: false;
+    // Mostra o número das 9 primeiras linhas só quando Ctrl+Shift+número está ligado.
+    in property <bool> quick-paste: true;
 
     callback query-edited(string);
+    // O segundo argumento é Shift: com ele, só copia; sem ele, cola no app de origem.
     callback activate(int, bool);
     callback toggle-pin(int);
+    callback remove(int);
+    // Ctrl+Enter ou menu: abre o link no navegador (em outros itens, cola).
+    callback open-link(int);
+    // Menu "Colar como": cola o texto transformado ("upper", "lower", "oneline", "trim",
+    // "digits", "json-pretty", "json-min").
+    callback paste-as(int, string);
+    // Enter com várias linhas selecionadas: cola (ou copia) os textos juntos.
+    callback activate-range(int, int, bool);
+    // Nome novo de um fixado; vazio tira o nome.
+    callback rename(int, string);
+    // Menu de uma imagem: grava um PNG em Imagens\Landpad.
+    callback save-image(int);
     callback pinned-filter(bool);
     callback selection-changed();
     callback open-settings();
@@ -70,7 +123,7 @@ export component AppWindow inherits Window {
 
     property <length> row-h: 30px;
     property <length> card-h: 164px;
-    property <bool> has-preview: root.preview.width > 0;
+    property <bool> has-preview: root.preview.width > 0 || root.preview-text != "";
     // Topo da linha selecionada dentro da área visível da lista.
     property <length> selected-top: root.selected * root.row-h + list.content-y;
     property <bool> dark: Palette.color-scheme == ColorScheme.dark;
@@ -86,8 +139,19 @@ export component AppWindow inherits Window {
         search.text = "";
         root.only-pinned = false;
         root.selected = 0;
+        root.anchor = -1;
         list.content-y = 0;
         search.focus();
+    }
+
+    // Caixinha para dar nome a um fixado (F2 ou menu). O conteúdo do PopupWindow só existe
+    // enquanto ele está aberto, então o nome atual chega por esta propriedade.
+    property <int> rename-index: -1;
+    property <string> rename-current;
+    function start-rename(index: int, current: string) {
+        root.rename-index = index;
+        root.rename-current = current;
+        rename-popup.show();
     }
 
     // Seleciona e rola até a linha, como as setas fazem.
@@ -98,8 +162,21 @@ export component AppWindow inherits Window {
     function toggle-filter() {
         root.only-pinned = !root.only-pinned;
         root.selected = 0;
+        root.anchor = -1;
         list.content-y = 0;
         root.pinned-filter(root.only-pinned);
+    }
+
+    // Com `extend`, a linha de partida vira âncora e a seleção cresce até a nova linha.
+    function move-by(delta: int, extend: bool) {
+        if (extend) {
+            if (root.anchor < 0) {
+                root.anchor = root.selected;
+            }
+        } else {
+            root.anchor = -1;
+        }
+        root.move(delta);
     }
 
     function move(delta: int) {
@@ -119,27 +196,41 @@ export component AppWindow inherits Window {
     FocusScope {
         capture-key-pressed(event) => {
             if (event.text == Key.UpArrow) {
-                root.move(-1);
+                root.move-by(-1, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.DownArrow) {
-                root.move(1);
+                root.move-by(1, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.PageUp) {
-                root.move(-10);
+                root.move-by(-10, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.PageDown) {
-                root.move(10);
+                root.move-by(10, event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.Return) {
-                root.activate(root.selected, event.modifiers.shift);
+                if (root.anchor >= 0 && root.anchor != root.selected) {
+                    root.activate-range(root.sel-lo, root.sel-hi, event.modifiers.shift);
+                } else if (event.modifiers.control) {
+                    root.open-link(root.selected);
+                } else {
+                    root.activate(root.selected, event.modifiers.shift);
+                }
+                return accept;
+            }
+            if (event.text == Key.F2) {
+                if (root.selected < root.rows.length && root.rows[root.selected].pinned) {
+                    root.start-rename(root.selected, root.rows[root.selected].name);
+                }
                 return accept;
             }
             if (event.text == Key.Escape) {
-                if (search.text != "") {
+                if (root.anchor >= 0) {
+                    root.anchor = -1;
+                } else if (search.text != "") {
                     search.text = "";
                     root.selected = 0;
                     root.query-edited("");
@@ -150,6 +241,12 @@ export component AppWindow inherits Window {
             }
             if (event.text == Key.Tab || event.text == Key.Backtab) {
                 root.toggle-filter();
+                return accept;
+            }
+            if (event.text == Key.Delete) {
+                if (root.selected < root.rows.length) {
+                    root.remove(root.selected);
+                }
                 return accept;
             }
             if (event.modifiers.control && (event.text == "p" || event.text == "P")) {
@@ -261,13 +358,109 @@ export component AppWindow inherits Window {
                     for row[i] in root.rows: Rectangle {
                         height: root.row-h;
 
-                        Rectangle {
+                        // Botão direito: as mesmas ações das teclas, para quem não as conhece.
+                        menu := ContextMenuArea {
                             x: 4px;
                             y: 1px;
                             width: parent.width - 8px;
                             height: parent.height - 2px;
+
+                            Menu {
+                                MenuItem {
+                                    title: "Colar (Enter)";
+                                    activated => {
+                                        root.activate(i, false);
+                                    }
+                                }
+                                MenuItem {
+                                    title: "Copiar sem colar (Shift+Enter)";
+                                    activated => {
+                                        root.activate(i, true);
+                                    }
+                                }
+                                if row.kind == "link" || row.kind == "email" || row.kind == "path": MenuItem {
+                                    title: row.kind == "link" ? "Abrir no navegador (Ctrl+Enter)"
+                                        : row.kind == "email" ? "Escrever e-mail (Ctrl+Enter)"
+                                        : "Abrir no Explorer (Ctrl+Enter)";
+                                    activated => {
+                                        root.open-link(i);
+                                    }
+                                }
+                                if row.kind == "doc" || row.kind == "phone": MenuItem {
+                                    title: "Colar só os números";
+                                    activated => {
+                                        root.paste-as(i, "digits");
+                                    }
+                                }
+                                if row.kind == "json": MenuItem {
+                                    title: "Colar formatado";
+                                    activated => {
+                                        root.paste-as(i, "json-pretty");
+                                    }
+                                }
+                                if row.kind == "json": MenuItem {
+                                    title: "Colar compacto";
+                                    activated => {
+                                        root.paste-as(i, "json-min");
+                                    }
+                                }
+                                if row.kind == "image": MenuItem {
+                                    title: "Salvar em Imagens\\Landpad";
+                                    activated => {
+                                        root.save-image(i);
+                                    }
+                                }
+                                if row.kind != "image": Menu {
+                                    title: "Colar como";
+                                    MenuItem {
+                                        title: "MAIÚSCULAS";
+                                        activated => {
+                                            root.paste-as(i, "upper");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "minúsculas";
+                                        activated => {
+                                            root.paste-as(i, "lower");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "Uma linha só";
+                                        activated => {
+                                            root.paste-as(i, "oneline");
+                                        }
+                                    }
+                                    MenuItem {
+                                        title: "Sem espaços extras";
+                                        activated => {
+                                            root.paste-as(i, "trim");
+                                        }
+                                    }
+                                }
+                                MenuSeparator { }
+                                MenuItem {
+                                    title: row.pinned ? "Soltar (Ctrl+P)" : "Fixar no topo (Ctrl+P)";
+                                    activated => {
+                                        root.toggle-pin(i);
+                                    }
+                                }
+                                if row.pinned: MenuItem {
+                                    title: row.name == "" ? "Dar um nome… (F2)" : "Renomear… (F2)";
+                                    activated => {
+                                        root.start-rename(i, row.name);
+                                    }
+                                }
+                                MenuItem {
+                                    title: "Apagar (Delete)";
+                                    activated => {
+                                        root.remove(i);
+                                    }
+                                }
+                            }
+
+                        Rectangle {
                             border-radius: 4px;
-                            background: i == root.selected ? root.selected-bg : (touch.has-hover || pin-touch.has-hover ? root.hover-bg : transparent);
+                            background: i >= root.sel-lo && i <= root.sel-hi ? root.selected-bg : (touch.has-hover || pin-touch.has-hover ? root.hover-bg : transparent);
 
                             Rectangle {
                                 x: 0px;
@@ -285,7 +478,7 @@ export component AppWindow inherits Window {
                                 padding-right: 30px;
                                 spacing: 8px;
 
-                                Text {
+                                if root.quick-paste: Text {
                                     width: 12px;
                                     text: i < 9 ? "\{i + 1}" : "";
                                     font-size: 11px;
@@ -338,8 +531,10 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                     vertical-alignment: center;
                                     color: Palette.foreground;
-                                    font-family: row.kind == "code" ? "Cascadia Mono" : "Segoe UI Variable Text";
-                                    font-size: row.kind == "code" ? 12px : 13px;
+                                    // Um fixado com nome mostra o nome, em peso maior; o conteúdo fica na prévia.
+                                    font-family: row.name == "" && (row.kind == "code" || row.kind == "json") ? "Cascadia Mono" : "Segoe UI Variable Text";
+                                    font-size: row.name == "" && (row.kind == "code" || row.kind == "json") ? 12px : 13px;
+                                    font-weight: row.name != "" ? 600 : 400;
                                 }
 
                                 Text {
@@ -350,12 +545,21 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // Clique cola o item, como o Enter; com Shift, só copia. Botão direito
+                            // seleciona e abre o menu (a TouchArea fica com o evento, então o
+                            // menu é aberto daqui).
                             touch := TouchArea {
-                                clicked => {
-                                    root.selected = i;
-                                }
-                                double-clicked => {
-                                    root.activate(i, false);
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.up && event.button == PointerEventButton.left) {
+                                        root.anchor = -1;
+                                        root.selected = i;
+                                        root.activate(i, event.modifiers.shift);
+                                    }
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                        root.anchor = -1;
+                                        root.selected = i;
+                                        menu.show({ x: self.mouse-x, y: self.mouse-y });
+                                    }
                                 }
                             }
 
@@ -370,7 +574,7 @@ export component AppWindow inherits Window {
                                     width: parent.width;
                                     height: parent.height;
                                     filled: row.pinned;
-                                    font-size: 12px;
+                                    font-size: 13px;
                                     color: !parent.lit ? transparent : row.pinned ? root.accent : pin-touch.has-hover ? Palette.foreground : root.muted;
                                 }
 
@@ -380,6 +584,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -404,7 +609,7 @@ export component AppWindow inherits Window {
                     border-color: Palette.border;
                     background: root.card-bg;
 
-                    Image {
+                    if root.preview.width > 0: Image {
                         x: 6px;
                         y: 6px;
                         width: parent.width - 12px;
@@ -412,6 +617,19 @@ export component AppWindow inherits Window {
                         source: root.preview;
                         // A prévia já vem no tamanho certo; só não deixa ampliar imagens pequenas.
                         image-fit: preserve;
+                    }
+                    if root.preview-text != "": Text {
+                        x: 12px;
+                        y: 10px;
+                        width: parent.width - 24px;
+                        height: parent.height - 20px;
+                        text: root.preview-text;
+                        wrap: word-wrap;
+                        overflow: elide;
+                        vertical-alignment: top;
+                        color: Palette.foreground;
+                        font-family: root.preview-mono ? "Cascadia Mono" : "Segoe UI Variable Text";
+                        font-size: 12px;
                     }
                 }
             }
@@ -448,5 +666,43 @@ export component AppWindow inherits Window {
         height: parent.height;
         border-width: 1px;
         border-color: Palette.border;
+    }
+
+    rename-popup := PopupWindow {
+        x: 8px;
+        y: 48px;
+        width: root.width - 16px;
+        height: 40px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: root.card-bg;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: Palette.border;
+            HorizontalLayout {
+                padding: 5px;
+                padding-left: 10px;
+                spacing: 8px;
+                Text {
+                    text: "Nome:";
+                    vertical-alignment: center;
+                    color: root.muted;
+                }
+                rename-edit := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "Como este fixado aparece na lista";
+                    text: root.rename-current;
+                    init => {
+                        self.focus();
+                        self.select-all();
+                    }
+                    accepted(text) => {
+                        root.rename(root.rename-index, text);
+                        rename-popup.close();
+                    }
+                }
+            }
+        }
     }
 }

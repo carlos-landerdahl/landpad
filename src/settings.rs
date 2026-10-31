@@ -8,7 +8,10 @@ use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::config::{self, Theme, MAX_ITEMS, MIN_ITEMS};
 use crate::win::{self, Hotkey, Position};
-use crate::{apply_config, clear_history, hwnd_of, logo_image, save_snapshot, with_hwnd, with_state, SettingsWindow, State};
+use crate::{
+    apply_config, clear_history, cleared_count, hwnd_of, logo_image, save_snapshot, undo_clear, with_hwnd, with_state,
+    SettingsWindow, State,
+};
 
 const RECORD_HINT: &str = "Aperte o atalho…";
 
@@ -104,9 +107,23 @@ fn fill(w: &SettingsWindow) {
         w.set_max_items(c.max_items as i32);
         w.set_keep_images(c.keep_images);
         w.set_check_updates(c.check_updates);
+        w.set_persist_pinned(c.persist_pinned);
+        w.set_persist_history(c.persist_history);
+        w.set_portable(config::portable_dir().is_some());
         // Na versão da Microsoft Store quem atualiza é a loja.
         w.set_show_updates(!win::is_packaged());
         w.set_history_status(history_status(st).into());
+        w.set_can_undo(cleared_count(st) > 0);
+        let (popup, shot, color, prev) = default_hotkeys();
+        w.set_hotkeys_default(
+            c.popup_hotkey == popup && c.shot_hotkey == shot && c.color_hotkey == color && c.prev_hotkey == prev,
+        );
+        w.set_default_hotkeys(
+            format!("{}, {}, {} e {}", popup.label(), shot.label(), color.label(), prev.label()).into(),
+        );
+        let (label, status) = hotkey_text(c.prev_hotkey, st.hotkeys.prev);
+        w.set_prev_hotkey(label.into());
+        w.set_prev_status(status.into());
         let (label, status) = hotkey_text(c.popup_hotkey, st.hotkeys.popup);
         w.set_popup_hotkey(label.into());
         w.set_popup_status(status.into());
@@ -120,10 +137,20 @@ fn fill(w: &SettingsWindow) {
 }
 
 fn history_status(st: &State) -> String {
+    let cleared = cleared_count(st);
+    if cleared > 0 {
+        let items = if cleared == 1 { "item apagado" } else { "itens apagados" };
+        return format!("{cleared} {items}. Dá para desfazer por alguns segundos.");
+    }
     let pinned = st.clips.iter().filter(|c| c.pinned.is_some()).count();
     let total = st.clips.len();
     let items = if total == 1 { "item" } else { "itens" };
     format!("{total} {items} agora, {pinned} fixados. Os fixados são mantidos.")
+}
+
+/// Os atalhos de fábrica, para o botão "Restaurar" e a descrição dele.
+fn default_hotkeys() -> win::HotkeySet {
+    (Hotkey::DEFAULT_POPUP, Hotkey::DEFAULT_SHOT, Hotkey::DEFAULT_COLOR, Hotkey::DEFAULT_PREV)
 }
 
 /// O atalho escolhido e, se o Windows não aceitou, o porquê.
@@ -148,6 +175,8 @@ fn wire(w: &SettingsWindow) {
             c.max_items = (w.get_max_items().max(0) as usize).clamp(MIN_ITEMS, MAX_ITEMS);
             c.keep_images = w.get_keep_images();
             c.check_updates = w.get_check_updates();
+            c.persist_pinned = w.get_persist_pinned();
+            c.persist_history = w.get_persist_history();
             st.paused = w.get_paused();
             apply_config(st, c);
         });
@@ -225,6 +254,30 @@ fn wire(w: &SettingsWindow) {
         }
     });
 
+    w.on_open_repo(|| win::open_url(&format!("https://github.com/{}", crate::update::REPO)));
+
+    let weak = w.as_weak();
+    w.on_undo_clear(move || {
+        with_state(undo_clear);
+        if let Some(w) = weak.upgrade() {
+            fill(&w);
+        }
+    });
+
+    let weak = w.as_weak();
+    w.on_reset_hotkeys(move || {
+        let keys = default_hotkeys();
+        with_state(|st| {
+            let mut c = st.config.clone();
+            (c.popup_hotkey, c.shot_hotkey, c.color_hotkey, c.prev_hotkey) = keys;
+            apply_config(st, c);
+        });
+        win::set_hotkeys(keys);
+        if let Some(w) = weak.upgrade() {
+            fill(&w);
+        }
+    });
+
     let weak = w.as_weak();
     w.window().on_close_requested(move || {
         if let Some(w) = weak.upgrade() {
@@ -250,7 +303,7 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
     if let Some(key) = key {
         let problem = with_state(|st| {
             let c = &st.config;
-            let others = [(1, c.popup_hotkey), (2, c.shot_hotkey), (3, c.color_hotkey)];
+            let others = [(1, c.popup_hotkey), (2, c.shot_hotkey), (3, c.color_hotkey), (4, c.prev_hotkey)];
             if !key.is_valid() {
                 Some("Use Ctrl, Alt, Shift ou Win junto".to_string())
             } else if others.iter().any(|&(id, k)| id != which && k == key) {
@@ -269,7 +322,8 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
             match which {
                 1 => c.popup_hotkey = key,
                 2 => c.shot_hotkey = key,
-                _ => c.color_hotkey = key,
+                3 => c.color_hotkey = key,
+                _ => c.prev_hotkey = key,
             }
             apply_config(st, c);
         });
@@ -279,7 +333,7 @@ fn finish_recording(weak: &slint::Weak<SettingsWindow>, which: i32, key: Option<
     }
     w.set_recording(0);
     w.set_record_hint(RECORD_HINT.into());
-    let keys = with_state(|st| (st.config.popup_hotkey, st.config.shot_hotkey, st.config.color_hotkey));
+    let keys = with_state(|st| (st.config.popup_hotkey, st.config.shot_hotkey, st.config.color_hotkey, st.config.prev_hotkey));
     win::set_hotkeys(keys);
     fill(&w);
 }

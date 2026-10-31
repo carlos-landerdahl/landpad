@@ -13,8 +13,7 @@ const KEEP_LINES: usize = 300;
 static LOCK: Mutex<()> = Mutex::new(());
 
 pub fn path() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Landpad").join("landpad.log")
+    crate::config::local_dir().join("landpad.log")
 }
 
 pub fn info(message: impl AsRef<str>) {

@@ -192,7 +192,10 @@ export component SettingsWindow inherits Window {
     in property <string> shot-status;
     in property <string> color-hotkey;
     in property <string> color-status;
-    // 0: nada sendo gravado; 1: atalho do histórico; 2: da captura; 3: do conta-gotas.
+    in property <string> prev-hotkey;
+    in property <string> prev-status;
+    // 0: nada sendo gravado; 1: atalho do histórico; 2: da captura; 3: do conta-gotas;
+    // 4: colar o anterior.
     in-out property <int> recording;
     in property <string> record-hint: "Aperte o atalho…";
     in-out property <bool> quick-paste;
@@ -201,17 +204,30 @@ export component SettingsWindow inherits Window {
     in-out property <int> max-items;
     in-out property <bool> keep-images;
     in-out property <bool> check-updates;
+    in-out property <bool> persist-pinned;
+    in-out property <bool> persist-history;
+    // Rodando com config.ini ao lado do executável: tudo fica naquela pasta.
+    in property <bool> portable;
     in property <bool> show-updates: true;
     in property <string> history-status;
+    // Houve uma limpeza recente que ainda dá para desfazer.
+    in property <bool> can-undo;
+    // Os três atalhos estão nos valores de fábrica; e quais são eles, para a descrição.
+    in property <bool> hotkeys-default: true;
+    in property <string> default-hotkeys;
 
     // Qualquer preferência mudou: o Rust lê todas, aplica e salva.
     callback edited();
+    callback undo-clear();
+    callback reset-hotkeys();
     callback autostart-toggled(bool);
     callback record(int);
     callback cancel-record();
     callback add-app(string);
     callback remove-app(int);
     callback clear-history();
+    // Clique no endereço do projeto, na página Sobre.
+    callback open-repo();
 
     init => {
         Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light;
@@ -447,6 +463,25 @@ export component SettingsWindow inherits Window {
                     }
                     Row {
                         dark: root.dark;
+                        title: "Colar o item anterior";
+                        description: root.prev-status != "" ? root.prev-status : "Sem abrir o histórico. Apertar de novo alterna entre os dois últimos.";
+                        description-color: root.prev-status != "" ? root.warning : root.muted;
+                        HotkeyEditor {
+                            label: root.recording == 4 ? root.record-hint : root.prev-hotkey;
+                            recording: root.recording == 4;
+                            enabled: root.recording == 0;
+                            accent: root.accent;
+                            change => {
+                                root.recording = 4;
+                                root.record(4);
+                            }
+                            cancel => {
+                                root.cancel-record();
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
                         title: "Colar pelo número";
                         description: "Com o histórico aberto, Ctrl+Shift+1 a 9 colam o item daquela posição.";
                         description-color: root.muted;
@@ -456,6 +491,22 @@ export component SettingsWindow inherits Window {
                                 checked <=> root.quick-paste;
                                 toggled => {
                                     root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Restaurar os atalhos padrão";
+                        description: root.default-hotkeys;
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Button {
+                                text: "Restaurar";
+                                enabled: !root.hotkeys-default && root.recording == 0;
+                                clicked => {
+                                    root.reset-hotkeys();
                                 }
                             }
                         }
@@ -472,6 +523,26 @@ export component SettingsWindow inherits Window {
                             KeyLine {
                                 key: "Enter";
                                 action: "Cola o item selecionado";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Shift+Enter";
+                                action: "Só copia, sem colar";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Ctrl+Enter";
+                                action: "Abre o link no navegador";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Botão direito";
+                                action: "Menu: colar como maiúsculas, uma linha só e mais";
+                                muted: root.muted;
+                            }
+                            KeyLine {
+                                key: "Delete";
+                                action: "Apaga o item selecionado";
                                 muted: root.muted;
                             }
                             KeyLine {
@@ -509,6 +580,36 @@ export component SettingsWindow inherits Window {
                             alignment: center;
                             Switch {
                                 checked <=> root.paused;
+                                toggled => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Guardar os fixados entre sessões";
+                        description: root.portable ? "Cifrados com a sua conta do Windows, na pasta dados ao lado do Landpad (modo portátil)." : "Cifrados com a sua conta do Windows, em %LOCALAPPDATA%\\Landpad. Só você, neste computador, consegue ler.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.persist-pinned;
+                                toggled => {
+                                    root.edited();
+                                }
+                            }
+                        }
+                    }
+                    Row {
+                        dark: root.dark;
+                        title: "Guardar o histórico inteiro ao fechar";
+                        description: "Os textos voltam quando o Landpad abre de novo. Imagens só as fixadas.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.persist-history;
                                 toggled => {
                                     root.edited();
                                 }
@@ -633,9 +734,14 @@ export component SettingsWindow inherits Window {
                         VerticalLayout {
                             alignment: center;
                             Button {
-                                text: "Limpar";
+                                text: root.can-undo ? "Desfazer" : "Limpar";
+                                primary: root.can-undo;
                                 clicked => {
-                                    root.clear-history();
+                                    if (root.can-undo) {
+                                        root.undo-clear();
+                                    } else {
+                                        root.clear-history();
+                                    }
                                 }
                             }
                         }
@@ -687,10 +793,33 @@ export component SettingsWindow inherits Window {
                                 color: Palette.foreground;
                                 wrap: word-wrap;
                             }
-                            Text {
-                                text: "github.com/carlos-landerdahl/landpad";
-                                font-size: 13px;
-                                color: root.accent;
+                            // Link de verdade: abre no navegador e sublinha com o mouse em cima.
+                            HorizontalLayout {
+                                alignment: start;
+                                Rectangle {
+                                    width: repo-text.preferred-width;
+                                    height: repo-text.preferred-height + 2px;
+                                    repo-text := Text {
+                                        x: 0px;
+                                        y: 0px;
+                                        text: "github.com/carlos-landerdahl/landpad";
+                                        font-size: 13px;
+                                        color: root.accent;
+                                    }
+                                    Rectangle {
+                                        x: 0px;
+                                        y: parent.height - 1px;
+                                        width: parent.width;
+                                        height: 1px;
+                                        background: repo-touch.has-hover ? root.accent : transparent;
+                                    }
+                                    repo-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.open-repo();
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

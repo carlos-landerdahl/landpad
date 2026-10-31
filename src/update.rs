@@ -22,7 +22,7 @@ use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDL
 
 use crate::log;
 
-const REPO: &str = "carlos-landerdahl/landpad";
+pub const REPO: &str = "carlos-landerdahl/landpad";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Argumentos do Inno Setup para trocar a versão sem mostrar nada.
 const SILENT: [&str; 3] = ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"];
@@ -208,8 +208,7 @@ pub fn installed() -> bool {
 }
 
 fn pending_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    base.join("Landpad").join("atualizacao")
+    crate::config::local_dir().join("atualizacao")
 }
 
 fn latest() -> Result<Option<Release>, String> {

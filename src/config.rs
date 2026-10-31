@@ -29,6 +29,8 @@ pub struct Config {
     pub popup_hotkey: Hotkey,
     pub shot_hotkey: Hotkey,
     pub color_hotkey: Hotkey,
+    /// Cola o item anterior do histórico sem abrir o popup.
+    pub prev_hotkey: Hotkey,
     /// Ctrl+Shift+1..9 com o popup aberto.
     pub quick_paste: bool,
     /// Nomes de processo (sem .exe) cujas cópias nunca entram no histórico.
@@ -37,6 +39,10 @@ pub struct Config {
     pub keep_images: bool,
     /// Perguntar ao GitHub, uma vez por dia, se há versão nova.
     pub check_updates: bool,
+    /// Os fixados voltam quando o Landpad abre de novo (cifrados, ver store.rs).
+    pub persist_pinned: bool,
+    /// O histórico inteiro volta também (imagens só as fixadas).
+    pub persist_history: bool,
 }
 
 impl Default for Config {
@@ -47,18 +53,42 @@ impl Default for Config {
             popup_hotkey: Hotkey::DEFAULT_POPUP,
             shot_hotkey: Hotkey::DEFAULT_SHOT,
             color_hotkey: Hotkey::DEFAULT_COLOR,
+            prev_hotkey: Hotkey::DEFAULT_PREV,
             quick_paste: true,
             ignored_apps: Vec::new(),
             max_items: 500,
             keep_images: true,
             check_updates: true,
+            persist_pinned: true,
+            persist_history: false,
         }
     }
 }
 
+/// Modo portátil: com um `config.ini` ao lado do executável, tudo fica naquela pasta
+/// (preferências em `config.ini`, o resto em `dados\`) e nada vai para AppData. Serve para
+/// rodar de um pendrive ou de uma pasta sincronizada.
+pub fn portable_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    dir.join("config.ini").is_file().then_some(dir)
+}
+
 fn path() -> PathBuf {
+    if let Some(dir) = portable_dir() {
+        return dir.join("config.ini");
+    }
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Landpad").join("config.ini")
+}
+
+/// Onde ficam imagens, log, atualizações e o histórico guardado: `%LOCALAPPDATA%\Landpad`,
+/// ou `dados\` ao lado do executável no modo portátil.
+pub fn local_dir() -> PathBuf {
+    if let Some(dir) = portable_dir() {
+        return dir.join("dados");
+    }
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    base.join("Landpad")
 }
 
 /// Sem arquivo de preferências, é a primeira vez que o Landpad abre.
@@ -117,6 +147,7 @@ impl Config {
                 "atalho_historico" => c.popup_hotkey = Hotkey::parse(value).unwrap_or(c.popup_hotkey),
                 "atalho_captura" => c.shot_hotkey = Hotkey::parse(value).unwrap_or(c.shot_hotkey),
                 "atalho_cor" => c.color_hotkey = Hotkey::parse(value).unwrap_or(c.color_hotkey),
+                "atalho_colar_anterior" => c.prev_hotkey = Hotkey::parse(value).unwrap_or(c.prev_hotkey),
                 "colar_por_numero" => c.quick_paste = value != "nao",
                 "apps_ignorados" => {
                     c.ignored_apps = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(String::from).collect()
@@ -128,6 +159,8 @@ impl Config {
                 }
                 "guardar_imagens" => c.keep_images = value != "nao",
                 "procurar_atualizacoes" => c.check_updates = value != "nao",
+                "guardar_fixados" => c.persist_pinned = value != "nao",
+                "guardar_historico" => c.persist_history = value == "sim",
                 _ => {}
             }
         }
@@ -139,8 +172,9 @@ impl Config {
         let text = format!(
             "# Preferências do Landpad. O app regrava este arquivo a cada mudança.\n\
              tema = {}\nposicao = {}\natalho_historico = {}\natalho_captura = {}\natalho_cor = {}\n\
+             atalho_colar_anterior = {}\n\
              colar_por_numero = {}\napps_ignorados = {}\nmax_itens = {}\nguardar_imagens = {}\n\
-             procurar_atualizacoes = {}\n",
+             procurar_atualizacoes = {}\nguardar_fixados = {}\nguardar_historico = {}\n",
             match self.theme {
                 Theme::System => "sistema",
                 Theme::Light => "claro",
@@ -154,11 +188,14 @@ impl Config {
             self.popup_hotkey.to_config(),
             self.shot_hotkey.to_config(),
             self.color_hotkey.to_config(),
+            self.prev_hotkey.to_config(),
             yes_no(self.quick_paste),
             self.ignored_apps.join(", "),
             self.max_items,
             yes_no(self.keep_images),
             yes_no(self.check_updates),
+            yes_no(self.persist_pinned),
+            yes_no(self.persist_history),
         );
         let path = path();
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));

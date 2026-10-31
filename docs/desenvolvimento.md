@@ -6,11 +6,12 @@ Rust, com a crate `windows` para a integração com o Win32 e o Slint para as ja
 
 | Módulo | O que faz |
 |---|---|
-| `src/main.rs` | Estado do histórico, popup, busca, fixados e a ligação entre as partes |
+| `src/main.rs` | Estado do histórico, popup, busca, tipos de item, fixados, prévia e a ligação entre as partes |
 | `src/win.rs` | Thread do Windows: clipboard, atalhos globais, bandeja, colar, gravação de atalho |
-| `src/shot.rs` | Captura de tela: thread própria, desenho com GDI e GDI+ |
+| `src/shot.rs` | Captura de tela e conta-gotas: thread própria, GDI e GDI+, seleção de janela, OCR (WinRT), fixar na tela |
 | `src/settings.rs` | Janela de configurações, criada ao abrir e liberada ao fechar |
-| `src/config.rs` | Preferências em `%APPDATA%\Landpad\config.ini` e iniciar com o Windows |
+| `src/config.rs` | Preferências em `%APPDATA%\Landpad\config.ini`, modo portátil e iniciar com o Windows |
+| `src/store.rs` | Fixados (e, opcionalmente, o histórico) entre sessões, cifrados com DPAPI |
 | `src/images.rs` | Imagens do histórico em disco enquanto o app está aberto |
 | `src/update.rs` | Checagem de versão nova, download conferido por SHA-256 e instalação |
 | `src/logo.rs` | O ícone desenhado em código, usado no app, no `.exe` e no instalador |
@@ -45,7 +46,7 @@ O Landpad sabe que foi instalado pelo instalador quando acha o `unins000.exe` ao
 
 - Tudo fica em `%LOCALAPPDATA%\Landpad\landpad.log`: versão, de onde o app abriu, se está instalado, cada checagem, download e instalação. O log do Inno Setup da última atualização fica em `%LOCALAPPDATA%\Landpad\atualizacao.log`.
 - Para testar sem publicar, rode com `LANDPAD_TEST_VERSION=0.1.0`: o app se comporta como se fosse essa versão e acha a última publicada como nova.
-- Os comandos rodados pelo Claude Code no app desktop enxergam uma cópia do registro do Windows. Para conferir o registro de verdade (por exemplo, a versão em Configurações > Aplicativos), leia por um processo aberto pelo Explorer.
+- Os comandos rodados pelo Claude Code no app desktop enxergam uma cópia do registro do Windows e das pastas em AppData (o que eles gravam vai para `%LOCALAPPDATA%\Packages\Claude_…\LocalCache`). Para conferir o que o Windows vê de verdade (a versão em Configurações > Aplicativos, o `landpad.log`), leia por um processo aberto pelo Explorer.
 
 ## Microsoft Store
 

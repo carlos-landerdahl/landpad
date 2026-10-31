@@ -27,6 +27,7 @@ use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::System::ProcessStatus::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::{
@@ -43,6 +44,8 @@ use crate::update::UpdateState;
 const HOTKEY_ID: i32 = 1;
 const SHOT_ID: i32 = 2;
 const COLOR_ID: i32 = 3;
+/// Cola o item anterior do histórico sem abrir o popup.
+const PREV_ID: i32 = 4;
 /// Ctrl+Shift+1..9 usam os ids 10 a 18.
 const QUICK_ID: i32 = 10;
 /// Pedido da thread da interface para ligar (wparam 1) ou desligar os atalhos de número.
@@ -85,6 +88,8 @@ pub struct Handlers {
     pub on_quick: Box<dyn Fn(usize) + Send>,
     pub on_shot: Box<dyn Fn() + Send>,
     pub on_color: Box<dyn Fn() + Send>,
+    /// Atalho de colar o anterior; recebe a janela em foco, que é onde colar.
+    pub on_prev: Box<dyn Fn(Target) + Send>,
     pub on_tray: Box<dyn Fn(TrayCommand) + Send>,
     /// O Windows trocou entre claro e escuro.
     pub on_theme: Box<dyn Fn() + Send>,
@@ -106,10 +111,17 @@ pub enum TrayCommand {
     Update,
     Shot,
     Color,
+    /// Cola o item anterior no último app em foco.
+    PastePrevious,
     Pause,
     Settings,
     Quit,
+    /// Clique no aviso de "captura salva": mostra o arquivo no Explorer.
+    RevealSaved,
 }
+
+/// Os quatro atalhos globais, na ordem: histórico, captura, conta-gotas, colar o anterior.
+pub type HotkeySet = (Hotkey, Hotkey, Hotkey, Hotkey);
 
 /// Um atalho global: modificadores do RegisterHotKey (MOD_CONTROL etc.) e a tecla virtual.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -129,6 +141,9 @@ impl Hotkey {
     /// Em alguns Windows ele já está tomado; aí vale Ctrl+Shift+PrtSc, da família da captura.
     pub const DEFAULT_COLOR: Hotkey = Hotkey { mods: MOD_WIN.0 | MOD_SHIFT.0, vk: 0x43 };
     const FALLBACK_COLOR: Hotkey = Hotkey { mods: MOD_CONTROL.0 | MOD_SHIFT.0, vk: VK_SNAPSHOT.0 as u32 };
+    /// Ctrl+Shift+`: a mesma tecla do histórico, com Shift, cola o item anterior direto.
+    pub const DEFAULT_PREV: Hotkey = Hotkey { mods: MOD_CONTROL.0 | MOD_SHIFT.0, vk: VK_OEM_3.0 as u32 };
+    const FALLBACK_PREV: Hotkey = Hotkey { mods: MOD_CONTROL.0 | MOD_ALT.0 | MOD_SHIFT.0, vk: VK_V.0 as u32 };
 
     /// Como o atalho aparece para o usuário, com o nome da tecla no layout atual do teclado.
     pub fn label(self) -> String {
@@ -162,6 +177,7 @@ impl Hotkey {
             Hotkey::DEFAULT_POPUP => Some(Hotkey::FALLBACK_POPUP),
             Hotkey::DEFAULT_SHOT => Some(Hotkey::FALLBACK_SHOT),
             Hotkey::DEFAULT_COLOR => Some(Hotkey::FALLBACK_COLOR),
+            Hotkey::DEFAULT_PREV => Some(Hotkey::FALLBACK_PREV),
             _ => None,
         }
     }
@@ -207,6 +223,7 @@ pub struct Hotkeys {
     pub popup: Option<Hotkey>,
     pub shot: Option<Hotkey>,
     pub color: Option<Hotkey>,
+    pub prev: Option<Hotkey>,
 }
 
 /// Onde o popup abre.
@@ -230,8 +247,8 @@ static FORMATS: OnceLock<Formats> = OnceLock::new();
 /// A janela oculta, para a thread da interface poder mandar pedidos para cá.
 static MESSAGE_HWND: AtomicIsize = AtomicIsize::new(0);
 /// Atalhos que a interface quer; a thread do Windows registra quando recebe WM_HOTKEYS.
-static WANTED: Mutex<(Hotkey, Hotkey, Hotkey)> =
-    Mutex::new((Hotkey::DEFAULT_POPUP, Hotkey::DEFAULT_SHOT, Hotkey::DEFAULT_COLOR));
+static WANTED: Mutex<HotkeySet> =
+    Mutex::new((Hotkey::DEFAULT_POPUP, Hotkey::DEFAULT_SHOT, Hotkey::DEFAULT_COLOR, Hotkey::DEFAULT_PREV));
 /// Regras de captura, lidas a cada cópia.
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static KEEP_IMAGES: AtomicBool = AtomicBool::new(true);
@@ -257,7 +274,7 @@ thread_local! {
 }
 
 /// Sobe a thread do Windows e devolve os atalhos que conseguiu registrar.
-pub fn start(handlers: Handlers, options: Options, keys: (Hotkey, Hotkey, Hotkey)) -> Result<Hotkeys, String> {
+pub fn start(handlers: Handlers, options: Options, keys: HotkeySet) -> Result<Hotkeys, String> {
     *WANTED.lock().unwrap() = keys;
     let (tx, rx) = mpsc::channel();
     std::thread::Builder::new()
@@ -349,7 +366,7 @@ unsafe fn setup(options: &Options) -> Result<Hotkeys, String> {
 /// Lightshot, por exemplo), tenta o alternativo.
 unsafe fn register_hotkeys(hwnd: HWND) -> Hotkeys {
     unregister_hotkeys(hwnd);
-    let (popup, shot, color) = *WANTED.lock().unwrap();
+    let (popup, shot, color, prev) = *WANTED.lock().unwrap();
     let register = |id: i32, want: Hotkey| {
         [Some(want), want.fallback()]
             .into_iter()
@@ -360,6 +377,7 @@ unsafe fn register_hotkeys(hwnd: HWND) -> Hotkeys {
         popup: register(HOTKEY_ID, popup),
         shot: register(SHOT_ID, shot),
         color: register(COLOR_ID, color),
+        prev: register(PREV_ID, prev),
     };
     ACTIVE.with(|a| a.set(active));
     active
@@ -369,10 +387,11 @@ unsafe fn unregister_hotkeys(hwnd: HWND) {
     let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
     let _ = UnregisterHotKey(Some(hwnd), SHOT_ID);
     let _ = UnregisterHotKey(Some(hwnd), COLOR_ID);
+    let _ = UnregisterHotKey(Some(hwnd), PREV_ID);
 }
 
 /// Pede para registrar os atalhos de novo; o resultado chega em `on_hotkeys`.
-pub fn set_hotkeys(keys: (Hotkey, Hotkey, Hotkey)) {
+pub fn set_hotkeys(keys: HotkeySet) {
     *WANTED.lock().unwrap() = keys;
     post(WM_HOTKEYS, 1);
 }
@@ -506,6 +525,14 @@ pub fn open_url(url: &str) {
     }
 }
 
+/// Abre a pasta do arquivo no Explorer, com ele selecionado.
+pub fn reveal_in_explorer(path: &std::path::Path) {
+    let args: Vec<u16> = format!("/select,\"{}\"", path.display()).encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), w!("explorer.exe"), PCWSTR(args.as_ptr()), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
 /// Instalado pela Microsoft Store (MSIX): quem atualiza é a loja.
 pub fn is_packaged() -> bool {
     let mut len = 0u32;
@@ -557,6 +584,7 @@ const CMD_SETTINGS: usize = 4;
 const CMD_QUIT: usize = 5;
 const CMD_UPDATE: usize = 6;
 const CMD_COLOR: usize = 7;
+const CMD_PREV: usize = 8;
 
 unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let Ok(menu) = CreatePopupMenu() else { return };
@@ -571,6 +599,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let open = item("Abrir histórico", active.popup);
     let shot = item("Capturar a tela", active.shot);
     let color = item("Pegar cor da tela", active.color);
+    let prev = item("Colar o item anterior", active.prev);
     let pause = item("Pausar a captura", None);
     let settings = item("Configurações…", None);
     let quit = item("Sair", None);
@@ -589,6 +618,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, PCWSTR(open.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_SHOT, PCWSTR(shot.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_COLOR, PCWSTR(color.as_ptr()));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_PREV, PCWSTR(prev.as_ptr()));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
     let _ = AppendMenuW(menu, MF_STRING | paused, CMD_PAUSE, PCWSTR(pause.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, PCWSTR(settings.as_ptr()));
@@ -604,6 +634,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
         CMD_OPEN => TrayCommand::Open,
         CMD_SHOT => TrayCommand::Shot,
         CMD_COLOR => TrayCommand::Color,
+        CMD_PREV => TrayCommand::PastePrevious,
         CMD_PAUSE => TrayCommand::Pause,
         CMD_SETTINGS => TrayCommand::Settings,
         CMD_QUIT => TrayCommand::Quit,
@@ -697,6 +728,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_HOTKEY if wparam.0 == COLOR_ID as usize => {
             notify(|h| (h.on_color)());
+            LRESULT(0)
+        }
+        WM_HOTKEY if wparam.0 == PREV_ID as usize => {
+            let target = Target(GetForegroundWindow().0 as isize);
+            notify(|h| (h.on_prev)(target));
             LRESULT(0)
         }
         WM_HOTKEY if wparam.0 == SHOT_ID as usize => {
@@ -1047,9 +1083,28 @@ pub fn paste(clip: Captured, target: Target) {
         let hwnd = HWND(target.0 as *mut c_void);
         if !hwnd.is_invalid() {
             let _ = SetForegroundWindow(hwnd);
+            // O Ctrl+V vai para quem estiver em primeiro plano: espera o app de origem
+            // chegar lá, senão um app lento recebe o foco depois e o texto cai em outro lugar.
+            let t0 = Instant::now();
+            while GetForegroundWindow() != hwnd && t0.elapsed() < Duration::from_millis(300) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if GetForegroundWindow() != hwnd {
+                eprintln!("[colar] o app de origem não voltou ao primeiro plano em 300 ms; colando mesmo assim");
+            }
         }
+        // Um instante para o app processar a ativação antes de receber as teclas.
         std::thread::sleep(Duration::from_millis(40));
         send_ctrl_v();
+    });
+}
+
+/// Só põe no clipboard, sem colar: Shift+Enter no popup.
+pub fn copy(clip: Captured) {
+    std::thread::spawn(move || unsafe {
+        if let Err(e) = write_clipboard(&clip) {
+            eprintln!("[copiar] não consegui escrever no clipboard: {e}");
+        }
     });
 }
 
@@ -1166,6 +1221,18 @@ pub fn prepare_popup(hwnd: isize, focus: bool) {
             &corner as *const _ as *const c_void,
             std::mem::size_of_val(&corner) as u32,
         );
+        // Sombra do Windows numa janela sem moldura: o DWM só a desenha quando há "vidro"
+        // estendido para dentro da janela, nem que seja um pixel. O Slint pinta a área
+        // inteira, então o pixel não aparece; a sombra, sim.
+        let policy = DWMNCRP_ENABLED;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &policy as *const _ as *const c_void,
+            std::mem::size_of_val(&policy) as u32,
+        );
+        let margins = MARGINS { cxLeftWidth: 0, cxRightWidth: 0, cyTopHeight: 0, cyBottomHeight: 1 };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let wanted = (style | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
         if wanted != style {
