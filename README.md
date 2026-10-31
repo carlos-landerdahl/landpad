@@ -16,7 +16,7 @@ Baixe o `Landpad-Setup-x.y.z.exe` na página de [Releases](https://github.com/ca
 
 Na primeira vez o Windows pode mostrar "O Windows protegeu o computador", porque o executável ainda não tem assinatura digital: clique em **Mais informações** e depois em **Executar assim mesmo**.
 
-Também há um zip portátil (`Landpad-x.y.z-portatil.zip`), que roda sem instalar; nesse caso as atualizações não são automáticas.
+Também há um zip portátil (`Landpad-x.y.z-portatil.zip`), que roda sem instalar. Ele avisa quando sai versão nova, e o clique no aviso abre o instalador; daí em diante as atualizações são automáticas.
 
 ### Atualizações
 
@@ -46,6 +46,7 @@ Os atalhos, o tema, onde o histórico abre, iniciar com o Windows e o limite de 
 - Cópias de gerenciadores de senha (que avisam o Windows que a cópia é sensível) nunca entram no histórico, e você pode listar outros apps para ignorar.
 - O histórico fica na memória. Imagens copiadas ficam em `%LOCALAPPDATA%\Landpad\imagens` só enquanto o Landpad está aberto.
 - As preferências ficam em `%APPDATA%\Landpad\config.ini`.
+- O Landpad registra em `%LOCALAPPDATA%\Landpad\landpad.log` só o que ajuda a resolver problemas: versão, de onde abriu e o que aconteceu nas atualizações. Nada do que você copia vai para o log. Se algo der errado, é esse arquivo que vale mandar.
 
 ## Compilar
 

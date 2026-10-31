@@ -10,6 +10,7 @@ mod assets;
 mod color;
 mod config;
 mod images;
+mod log;
 mod logo;
 mod settings;
 mod shot;
@@ -117,13 +118,18 @@ fn main() -> Result<(), slint::PlatformError> {
     let testing = flag("--bench") || flag("--settings-test") || flag("--memory-test");
     if testing {
         images::use_test_dir();
-    } else if !win::first_instance() {
-        eprintln!("O Landpad já está aberto: procure o ícone na bandeja.");
-        return Ok(());
-    } else if update::install_pending() {
-        // A versão nova baixada ontem é instalada agora, com o histórico ainda vazio;
-        // o instalador abre o Landpad de novo quando terminar.
-        return Ok(());
+    } else {
+        if !win::first_instance() {
+            eprintln!("O Landpad já está aberto: procure o ícone na bandeja.");
+            return Ok(());
+        }
+        let exe = std::env::current_exe().map(|e| e.display().to_string()).unwrap_or_default();
+        log::info(format!("Landpad {} aberto de {exe}; instalado: {}", update::current(), update::installed()));
+        if update::install_pending() {
+            // A versão nova baixada ontem é instalada agora, com o histórico ainda vazio;
+            // o instalador abre o Landpad de novo quando terminar.
+            return Ok(());
+        }
     }
     // Sobra de uma execução encerrada à força.
     images::clear();
@@ -286,11 +292,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(ui) = weak.upgrade() else { return };
                 match command {
                     win::TrayCommand::Open => toggle(&ui, Instant::now(), win::last_app()),
-                    win::TrayCommand::Update => {
-                        if update::apply_now() {
-                            let _ = slint::quit_event_loop();
-                        }
-                    }
+                    win::TrayCommand::Update => update::apply_now(),
                     win::TrayCommand::Shot => start_shot(),
                     win::TrayCommand::Color => start_color(),
                     win::TrayCommand::Pause => {

@@ -2,10 +2,11 @@
 //! pergunta não leva nada sobre o usuário nem sobre o que ele copia (só o nome e a versão
 //! do app, no User-Agent que a API do GitHub exige), e dá para desligar.
 //!
-//! Instalado pelo instalador, o Landpad baixa a versão nova em segundo plano, confere o
-//! SHA-256 publicado junto e a instala na próxima vez que abrir, antes de mostrar qualquer
-//! coisa: nessa hora o histórico está vazio e ninguém perde nada. Rodando de outro lugar
-//! (zip, pasta do projeto), só avisa e abre a página da release.
+//! O Landpad baixa a versão nova em segundo plano e confere o SHA-256 publicado junto.
+//! Instalado pelo instalador, ele a instala sozinho na próxima vez que abrir, antes de
+//! mostrar qualquer coisa: nessa hora o histórico está vazio e ninguém perde nada. Rodando
+//! do zip portátil, o clique no aviso abre o instalador, e daí em diante ele se atualiza
+//! sozinho. Tudo fica registrado em landpad.log (ver log.rs).
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ use windows::Win32::Networking::WinHttp::{
 };
 use windows::Win32::Security::Cryptography::{BCryptHash, BCRYPT_SHA256_ALG_HANDLE};
 
+use crate::log;
+
 const REPO: &str = "carlos-landerdahl/landpad";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Argumentos do Inno Setup para trocar a versão sem mostrar nada.
@@ -30,38 +33,56 @@ pub struct Release {
     pub url: String,
 }
 
+/// Como a versão nova está, para o aviso da bandeja dizer o que o clique vai fazer.
+#[derive(Clone, Copy, PartialEq)]
+pub enum UpdateState {
+    /// Baixada e conferida; instala sozinha na próxima abertura.
+    Ready,
+    /// Baixada, mas este Landpad veio do zip: o clique abre o instalador.
+    Portable,
+    /// O download falhou; o clique tenta de novo.
+    NotDownloaded,
+}
+
+/// A versão desta cópia. `LANDPAD_TEST_VERSION` finge uma versão mais velha, para testar
+/// a atualização sem publicar nada (ver docs/desenvolvimento.md).
+pub fn current() -> String {
+    std::env::var("LANDPAD_TEST_VERSION").unwrap_or_else(|_| VERSION.to_string())
+}
+
 /// A versão nova encontrada e, se já foi baixada e conferida, o instalador dela.
 static FOUND: Mutex<Option<(Release, Option<PathBuf>)>> = Mutex::new(None);
 
-/// Consulta numa thread à parte. Se houver versão nova, baixa (quando instalado) e chama
-/// `on_found(versão, pronta para instalar)`.
-pub fn check(on_found: impl FnOnce(&str, bool) + Send + 'static) {
+/// Consulta numa thread à parte. Se houver versão nova, baixa e chama `on_found` com a
+/// versão e o estado dela.
+pub fn check(on_found: impl FnOnce(&str, UpdateState) + Send + 'static) {
     std::thread::spawn(move || {
+        let current = current();
         let release = match latest() {
-            Ok(Some(r)) if newer(&r.version, VERSION) => r,
-            Ok(Some(_)) => return println!("[atualização] o Landpad {VERSION} é a versão mais recente"),
-            Ok(None) => return println!("[atualização] ainda não há versões publicadas no GitHub"),
-            Err(e) => return eprintln!("[atualização] não consegui consultar o GitHub: {e}"),
+            Ok(Some(r)) if newer(&r.version, &current) => r,
+            Ok(Some(_)) => return log::info(format!("[atualização] o Landpad {current} é a versão mais recente")),
+            Ok(None) => return log::info("[atualização] ainda não há versões publicadas no GitHub"),
+            Err(e) => return log::error(format!("[atualização] não consegui consultar o GitHub: {e}")),
         };
-        println!("[atualização] versão {} disponível", release.version);
-        let installer = if installed() {
-            match download(&release.version) {
-                Ok(path) => {
-                    println!("[atualização] {} baixada e conferida; instala ao abrir de novo", release.version);
-                    Some(path)
-                }
-                Err(e) => {
-                    eprintln!("[atualização] não consegui baixar a {}: {e}", release.version);
-                    None
-                }
+        log::info(format!("[atualização] versão {} disponível (esta é a {current})", release.version));
+        let installer = match download(&release.version) {
+            Ok(path) => {
+                log::info(format!("[atualização] {} baixada e conferida em {}", release.version, path.display()));
+                Some(path)
             }
-        } else {
-            None
+            Err(e) => {
+                log::error(format!("[atualização] não consegui baixar a {}: {e}", release.version));
+                None
+            }
         };
-        let ready = installer.is_some();
+        let state = match (&installer, installed()) {
+            (None, _) => UpdateState::NotDownloaded,
+            (Some(_), true) => UpdateState::Ready,
+            (Some(_), false) => UpdateState::Portable,
+        };
         let version = release.version.clone();
         *FOUND.lock().unwrap() = Some((release, installer));
-        on_found(&version, ready);
+        on_found(&version, state);
     });
 }
 
@@ -85,17 +106,32 @@ pub fn report() {
     }
 }
 
-/// "Atualizar agora" (balão ou menu da bandeja): roda o instalador baixado, que fecha e
-/// reabre o Landpad, ou abre a página da release. Devolve true se o app deve sair.
-pub fn apply_now() -> bool {
-    let Some((release, installer)) = FOUND.lock().unwrap().clone() else { return false };
-    match installer {
-        Some(path) => run_installer(&path),
-        None => {
+/// Clique no aviso ou no menu da bandeja. Instalado, troca a versão sem mostrar nada e
+/// reabre o Landpad; vindo do zip, abre o instalador para a pessoa passar para a versão
+/// instalada. Se o download tinha falhado, tenta de novo; só se não der, abre a página da
+/// release. O app fecha sozinho quando o instalador começa.
+pub fn apply_now() {
+    let Some((release, installer)) = FOUND.lock().unwrap().clone() else { return };
+    std::thread::spawn(move || {
+        let path = match installer {
+            Some(path) => Ok(path),
+            None => download(&release.version),
+        };
+        let started = match path {
+            Ok(path) => run_installer(&path, installed()),
+            Err(e) => {
+                log::error(format!("[atualização] o download falhou de novo ({e}); abrindo a página da release"));
+                false
+            }
+        };
+        if started {
+            let _ = slint::invoke_from_event_loop(|| {
+                let _ = slint::quit_event_loop();
+            });
+        } else {
             crate::win::open_url(&release.url);
-            false
         }
-    }
+    });
 }
 
 /// Na partida: se há uma versão mais nova já baixada e conferida, instala antes de abrir
@@ -120,7 +156,7 @@ pub fn install_pending() -> bool {
             let _ = std::fs::remove_file(&path);
             continue;
         };
-        if newer(version, VERSION) && newest.as_ref().is_none_or(|(v, _)| newer(version, v)) {
+        if newer(version, &current()) && newest.as_ref().is_none_or(|(v, _)| newer(version, v)) {
             newest = Some((version.to_string(), path));
         } else {
             // Já instalada (ou mais velha): só ocupa espaço.
@@ -129,8 +165,8 @@ pub fn install_pending() -> bool {
     }
     match newest {
         Some((version, path)) if installed() => {
-            println!("[atualização] instalando a {version} antes de abrir");
-            run_installer(&path)
+            log::info(format!("[atualização] instalando a {version} antes de abrir"));
+            run_installer(&path, true)
         }
         _ => false,
     }
@@ -138,27 +174,37 @@ pub fn install_pending() -> bool {
 
 /// Tira o instalador da fila antes de rodar: se a instalação falhar, o app não fica
 /// tentando de novo a cada abertura; a checagem do dia seguinte baixa outra vez.
-fn run_installer(path: &Path) -> bool {
+/// `silent` troca a versão sem mostrar nada; sem ele, a pessoa vê o assistente.
+fn run_installer(path: &Path, silent: bool) -> bool {
     let running = std::env::temp_dir().join(path.file_name().unwrap_or_default());
     let path = if std::fs::rename(path, &running).is_ok() { running } else { path.to_path_buf() };
-    // O log da última atualização fica ao lado da fila, para diagnosticar se algo der errado.
-    let log = format!("/LOG={}", pending_dir().with_file_name("atualizacao.log").display());
-    match std::process::Command::new(&path).args(SILENT).arg(log).spawn() {
-        Ok(_) => true,
+    // O log do instalador fica ao lado da fila, para diagnosticar se algo der errado.
+    let installer_log = format!("/LOG={}", pending_dir().with_file_name("atualizacao.log").display());
+    let mut command = std::process::Command::new(&path);
+    if silent {
+        command.args(SILENT);
+    }
+    match command.arg(installer_log).spawn() {
+        Ok(_) => {
+            let how = if silent { "em silêncio" } else { "com o assistente" };
+            log::info(format!("[atualização] instalador aberto {how}: {}", path.display()));
+            true
+        }
         Err(e) => {
-            eprintln!("[atualização] não consegui abrir o instalador: {e}");
+            log::error(format!("[atualização] não consegui abrir o instalador {}: {e}", path.display()));
             false
         }
     }
 }
 
-/// Instalado pelo instalador (e não rodando de um zip ou da pasta do projeto): só aí o
-/// app se atualiza sozinho.
+/// Instalado pelo instalador (e não rodando do zip portátil ou da pasta do projeto): só aí
+/// o app se atualiza sozinho. O instalador sempre põe o desinstalador ao lado do Landpad;
+/// o zip não. Olhar o arquivo, e não o caminho, funciona em qualquer pasta de usuário.
 pub fn installed() -> bool {
-    let Some(base) = std::env::var_os("LOCALAPPDATA") else { return false };
-    let dir = PathBuf::from(base).join("Programs").join("Landpad");
-    let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-    exe_dir.is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case(&dir.to_string_lossy()))
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("unins000.exe")))
+        .is_some_and(|uninstaller| uninstaller.exists())
 }
 
 fn pending_dir() -> PathBuf {

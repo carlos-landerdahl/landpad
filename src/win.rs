@@ -38,6 +38,7 @@ use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::logo;
+use crate::update::UpdateState;
 
 const HOTKEY_ID: i32 = 1;
 const SHOT_ID: i32 = 2;
@@ -238,8 +239,8 @@ static IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Último app em primeiro plano que não é o Landpad nem a barra de tarefas: é para ele que
 /// colamos quando o popup é aberto pela bandeja.
 static LAST_APP: AtomicIsize = AtomicIsize::new(0);
-/// Versão nova anunciada pelo GitHub e se ela já está baixada, pronta para instalar.
-static UPDATE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+/// Versão nova anunciada pelo GitHub e em que estado ela está.
+static UPDATE: Mutex<Option<(String, UpdateState)>> = Mutex::new(None);
 /// O balão a mostrar (título, texto) e o que um clique nele faz.
 static BALLOON: Mutex<Option<(String, String, TrayCommand)>> = Mutex::new(None);
 /// O que o clique no último balão mostrado faz.
@@ -479,17 +480,23 @@ pub fn balloon(title: &str, text: &str, click: TrayCommand) {
 }
 
 /// Guarda a versão nova para o menu da bandeja e avisa com um balão.
-pub fn announce_update(version: &str, ready: bool) {
-    *UPDATE.lock().unwrap() = Some((version.to_string(), ready));
-    if ready {
-        balloon(
-            &format!("Landpad {version} pronto"),
+pub fn announce_update(version: &str, state: UpdateState) {
+    *UPDATE.lock().unwrap() = Some((version.to_string(), state));
+    let (title, text) = match state {
+        UpdateState::Ready => (
+            format!("Landpad {version} pronto"),
             "Instala sozinho na próxima vez que o Landpad abrir. Clique para atualizar agora (o histórico atual será apagado).",
-            TrayCommand::Update,
-        );
-    } else {
-        balloon(&format!("Landpad {version} disponível"), "Clique para abrir a página de download.", TrayCommand::Update);
-    }
+        ),
+        UpdateState::Portable => (
+            format!("Landpad {version} disponível"),
+            "Clique para instalar. A versão instalada se atualiza sozinha daqui em diante.",
+        ),
+        UpdateState::NotDownloaded => (
+            format!("Landpad {version} disponível"),
+            "Clique para atualizar agora (o histórico atual será apagado).",
+        ),
+    };
+    balloon(&title, text, TrayCommand::Update);
 }
 
 pub fn open_url(url: &str) {
@@ -568,8 +575,11 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let settings = item("Configurações…", None);
     let quit = item("Sair", None);
     let paused = if PAUSED.load(Ordering::Acquire) { MF_CHECKED } else { MF_UNCHECKED };
-    let update = UPDATE.lock().unwrap().as_ref().map(|(version, ready)| {
-        let text = if *ready { format!("Atualizar para a {version} agora") } else { format!("Baixar a versão {version}…") };
+    let update = UPDATE.lock().unwrap().as_ref().map(|(version, state)| {
+        let text = match state {
+            UpdateState::Portable => format!("Instalar a versão {version}…"),
+            _ => format!("Atualizar para a {version} agora"),
+        };
         item(&text, None)
     });
     if let Some(update) = &update {

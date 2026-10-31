@@ -39,6 +39,14 @@ Todos rodam com o Landpad aberto ao lado: usam uma pasta de imagens própria (`i
 
 Os Landpads instalados acham a versão nova em até um dia, baixam `Landpad-Setup-x.y.z.exe`, conferem com `Landpad-Setup-x.y.z.exe.sha256` e instalam na próxima abertura com `/VERYSILENT`. Por isso os nomes dos arquivos da release não podem mudar.
 
+O Landpad sabe que foi instalado pelo instalador quando acha o `unins000.exe` ao lado dele. Sem isso (zip portátil), ele baixa a versão nova igual, mas o clique no aviso abre o instalador com o assistente, em vez de instalar em silêncio.
+
+### Diagnosticar e testar atualizações
+
+- Tudo fica em `%LOCALAPPDATA%\Landpad\landpad.log`: versão, de onde o app abriu, se está instalado, cada checagem, download e instalação. O log do Inno Setup da última atualização fica em `%LOCALAPPDATA%\Landpad\atualizacao.log`.
+- Para testar sem publicar, rode com `LANDPAD_TEST_VERSION=0.1.0`: o app se comporta como se fosse essa versão e acha a última publicada como nova.
+- Os comandos rodados pelo Claude Code no app desktop enxergam uma cópia do registro do Windows. Para conferir o registro de verdade (por exemplo, a versão em Configurações > Aplicativos), leia por um processo aberto pelo Explorer.
+
 ## Microsoft Store
 
 O pacote MSIX é montado por `packaging/msix/build.ps1`; veja o [passo a passo](../packaging/msix/LEIA-ME.md).
