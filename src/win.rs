@@ -15,22 +15,32 @@ use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::DataExchange::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::*;
-use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::System::Ole::{CF_DIB, CF_UNICODETEXT};
 use windows::Win32::System::ProcessStatus::*;
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const HOTKEY_ID: i32 = 1;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
+/// Um print 4K em 32 bits tem ~33 MB; acima disso não guardamos.
+const MAX_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 
 /// A janela que estava em foco quando o atalho foi apertado: é para ela que colamos.
 #[derive(Clone, Copy, Default)]
 pub struct Target(isize);
 
+/// O que foi copiado, e o que colar de volta. Imagens vêm como DIB, o formato que todo
+/// app do Windows entende, e também como PNG quando o app de origem oferece (preserva transparência).
+pub enum Captured {
+    Text(String),
+    Image { dib: Vec<u8>, png: Option<Vec<u8>> },
+}
+
 pub struct Handlers {
-    pub on_clip: Box<dyn Fn(String, String) + Send>,
+    pub on_clip: Box<dyn Fn(Captured, String) + Send>,
     pub on_hotkey: Box<dyn Fn(Instant, Target) + Send>,
     pub on_foreground: Box<dyn Fn(isize) + Send>,
 }
@@ -40,6 +50,8 @@ struct Formats {
     own: u32,
     /// Formatos que gerenciadores de senha usam para pedir que a cópia não seja guardada.
     skip: [u32; 2],
+    /// PNG registrado por navegadores, Office e ferramentas de print.
+    png: u32,
 }
 
 static FORMATS: OnceLock<Formats> = OnceLock::new();
@@ -81,6 +93,7 @@ unsafe fn setup() -> Result<Option<&'static str>, String> {
             RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")),
             RegisterClipboardFormatW(w!("Clipboard Viewer Ignore")),
         ],
+        png: RegisterClipboardFormatW(w!("PNG")),
     });
 
     let instance = GetModuleHandleW(None).map_err(err)?;
@@ -183,17 +196,23 @@ unsafe fn on_clipboard_update() {
     if formats.skip.iter().any(|&f| f != 0 && IsClipboardFormatAvailable(f).is_ok()) {
         return;
     }
-    if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_err() {
+    // Texto tem prioridade: o Excel, por exemplo, copia células como texto e como imagem.
+    let captured = if IsClipboardFormatAvailable(CF_UNICODETEXT.0 as u32).is_ok() {
+        let Some(text) = read_text() else { return };
+        if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
+            return;
+        }
+        Captured::Text(text)
+    } else if IsClipboardFormatAvailable(CF_DIB.0 as u32).is_ok() {
+        let Some(image) = read_image() else { return };
+        image
+    } else {
         return;
-    }
-    let Some(text) = read_text() else { return };
-    if text.trim().is_empty() || text.len() > MAX_TEXT_BYTES {
-        return;
-    }
+    };
     let app = owner_app();
     HANDLERS.with(|h| {
         if let Some(h) = h.borrow().as_ref() {
-            (h.on_clip)(text, app);
+            (h.on_clip)(captured, app);
         }
     });
 }
@@ -235,6 +254,164 @@ unsafe fn read_open_clipboard_text() -> Option<String> {
     Some(text)
 }
 
+/// Copia os bytes e fecha o clipboard logo; miniatura e disco ficam para depois.
+unsafe fn read_image() -> Option<Captured> {
+    if !open_clipboard() {
+        return None;
+    }
+    let dib = read_open_clipboard_bytes(CF_DIB.0 as u32);
+    let png = match FORMATS.get() {
+        Some(f) if f.png != 0 && IsClipboardFormatAvailable(f.png).is_ok() => read_open_clipboard_bytes(f.png),
+        _ => None,
+    };
+    let _ = CloseClipboard();
+    let dib = dib?;
+    dib_info(&dib)?;
+    Some(Captured::Image { dib, png })
+}
+
+unsafe fn read_open_clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    let handle = GetClipboardData(format).ok()?;
+    let mem = HGLOBAL(handle.0);
+    let size = GlobalSize(mem);
+    if size == 0 || size > MAX_IMAGE_BYTES {
+        return None;
+    }
+    let ptr = GlobalLock(mem) as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, size).to_vec();
+    let _ = GlobalUnlock(mem);
+    Some(bytes)
+}
+
+/// Tamanho de uma imagem DIB e onde começam os pixels, depois do cabeçalho e da paleta.
+pub struct DibInfo {
+    pub width: u32,
+    pub height: u32,
+    pub bits_offset: usize,
+}
+
+pub fn dib_info(dib: &[u8]) -> Option<DibInfo> {
+    let u32_at = |o: usize| Some(u32::from_le_bytes(dib.get(o..o + 4)?.try_into().ok()?));
+    let header = u32_at(0)? as usize;
+    let width = u32_at(4)? as i32;
+    let height = (u32_at(8)? as i32).unsigned_abs();
+    let bit_count = u16::from_le_bytes(dib.get(14..16)?.try_into().ok()?);
+    let compression = u32_at(16)?;
+    let colors_used = u32_at(32)? as usize;
+    if header < 40 || width <= 0 || height == 0 || (width as u64) * (height as u64) > 200_000_000 {
+        return None;
+    }
+    // Com o cabeçalho básico, BI_BITFIELDS (3) e BI_ALPHABITFIELDS (6) trazem as máscaras logo depois.
+    let masks = match (header, compression) {
+        (40, 3) => 12,
+        (40, 6) => 16,
+        _ => 0,
+    };
+    let colors = if colors_used > 0 {
+        colors_used
+    } else if bit_count <= 8 {
+        1 << bit_count
+    } else {
+        0
+    };
+    let bits_offset = header + masks + colors * 4;
+    (bits_offset < dib.len()).then_some(DibInfo { width: width as u32, height, bits_offset })
+}
+
+/// Pixels RGBA de uma imagem reduzida.
+pub struct Pixels {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Reduz um DIB com o filtro HALFTONE do GDI, que aceita qualquer profundidade de cor.
+/// `fill` corta o centro para preencher `max_w`×`max_h`; sem ele, a imagem cabe inteira
+/// e nunca é ampliada.
+pub fn scale_dib(dib: &[u8], max_w: u32, max_h: u32, fill: bool) -> Option<Pixels> {
+    let info = dib_info(dib)?;
+    let (sw, sh) = (info.width as i64, info.height as i64);
+    let (mut src_x, mut src_y, mut src_w, mut src_h) = (0, 0, sw, sh);
+    let (dw, dh) = if fill {
+        let (dw, dh) = (max_w.max(1) as i64, max_h.max(1) as i64);
+        if sw * dh > sh * dw {
+            src_w = (sh * dw / dh).max(1);
+            src_x = (sw - src_w) / 2;
+        } else {
+            src_h = (sw * dh / dw).max(1);
+            src_y = (sh - src_h) / 2;
+        }
+        (dw, dh)
+    } else {
+        let scale = (max_w as f64 / sw as f64).min(max_h as f64 / sh as f64).min(1.0);
+        (((sw as f64 * scale).round() as i64).max(1), ((sh as f64 * scale).round() as i64).max(1))
+    };
+    let (dw, dh) = (dw as i32, dh as i32);
+
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return None;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: dw,
+                biHeight: -dh,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = std::ptr::null_mut();
+        let Ok(bitmap) = CreateDIBSection(Some(dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+            let _ = DeleteDC(dc);
+            return None;
+        };
+        let old = SelectObject(dc, bitmap.into());
+        SetStretchBltMode(dc, HALFTONE);
+        let _ = SetBrushOrgEx(dc, 0, 0, None);
+        let lines = StretchDIBits(
+            dc,
+            0,
+            0,
+            dw,
+            dh,
+            src_x as i32,
+            src_y as i32,
+            src_w as i32,
+            src_h as i32,
+            Some(dib.as_ptr().add(info.bits_offset) as *const c_void),
+            dib.as_ptr() as *const BITMAPINFO,
+            DIB_RGB_COLORS,
+            SRCCOPY,
+        );
+        let _ = GdiFlush();
+        let mut rgba = Vec::new();
+        if lines > 0 && !bits.is_null() {
+            let bgra = std::slice::from_raw_parts(bits as *const u8, dw as usize * dh as usize * 4);
+            rgba.reserve_exact(bgra.len());
+            for px in bgra.chunks_exact(4) {
+                rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+            }
+        }
+        SelectObject(dc, old);
+        let _ = DeleteObject(bitmap.into());
+        let _ = DeleteDC(dc);
+        (!rgba.is_empty()).then_some(Pixels { width: dw as u32, height: dh as u32, rgba })
+    }
+}
+
+/// Escala da tela principal (1,0 = 96 dpi), para gerar miniaturas sem reamostrar na hora de pintar.
+pub fn scale() -> f32 {
+    unsafe { GetDpiForSystem().max(96) as f32 / 96.0 }
+}
+
 /// Nome do .exe dono do clipboard (ou da janela em foco, se o dono não se identificar).
 unsafe fn owner_app() -> String {
     let mut hwnd = GetClipboardOwner().unwrap_or_default();
@@ -261,10 +438,10 @@ unsafe fn owner_app() -> String {
     name.strip_suffix(".exe").or_else(|| name.strip_suffix(".EXE")).unwrap_or(name).to_string()
 }
 
-/// Escreve o texto no clipboard, devolve o foco ao app de origem e envia Ctrl+V.
-pub fn paste(text: String, target: Target) {
+/// Escreve no clipboard, devolve o foco ao app de origem e envia Ctrl+V.
+pub fn paste(clip: Captured, target: Target) {
     std::thread::spawn(move || unsafe {
-        if let Err(e) = write_text(&text) {
+        if let Err(e) = write_clipboard(&clip) {
             eprintln!("[colar] não consegui escrever no clipboard: {e}");
             return;
         }
@@ -277,31 +454,45 @@ pub fn paste(text: String, target: Target) {
     });
 }
 
-unsafe fn write_text(text: &str) -> Result<(), String> {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+unsafe fn write_clipboard(clip: &Captured) -> Result<(), String> {
     if !open_clipboard() {
         return Err("clipboard ocupado por outro app".into());
     }
-    let result = write_open_clipboard(&wide);
+    let result = write_open_clipboard(clip);
     let _ = CloseClipboard();
     result
 }
 
-unsafe fn write_open_clipboard(wide: &[u16]) -> Result<(), String> {
+unsafe fn write_open_clipboard(clip: &Captured) -> Result<(), String> {
     EmptyClipboard().map_err(err)?;
-    let mem = GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(err)?;
-    let ptr = GlobalLock(mem) as *mut u16;
+    let formats = FORMATS.get();
+    match clip {
+        Captured::Text(text) => {
+            let wide: Vec<u8> = text.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect();
+            set_clipboard_bytes(CF_UNICODETEXT.0 as u32, &wide)?;
+        }
+        Captured::Image { dib, png } => {
+            set_clipboard_bytes(CF_DIB.0 as u32, dib)?;
+            if let (Some(png), Some(f)) = (png, formats) {
+                let _ = set_clipboard_bytes(f.png, png);
+            }
+        }
+    }
+    if let Some(f) = formats {
+        let _ = set_clipboard_bytes(f.own, &[0]);
+    }
+    Ok(())
+}
+
+unsafe fn set_clipboard_bytes(format: u32, bytes: &[u8]) -> Result<(), String> {
+    let mem = GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(err)?;
+    let ptr = GlobalLock(mem) as *mut u8;
     if ptr.is_null() {
         return Err("GlobalLock falhou".into());
     }
-    std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr, wide.len());
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     let _ = GlobalUnlock(mem);
-    SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(mem.0))).map_err(err)?;
-    if let Some(formats) = FORMATS.get() {
-        if let Ok(marker) = GlobalAlloc(GMEM_MOVEABLE, 1) {
-            let _ = SetClipboardData(formats.own, Some(HANDLE(marker.0)));
-        }
-    }
+    SetClipboardData(format, Some(HANDLE(mem.0))).map_err(err)?;
     Ok(())
 }
 

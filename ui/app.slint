@@ -4,6 +4,7 @@ export struct ClipRow {
     text: string,
     meta: string,
     kind: string,
+    thumb: image,
 }
 
 component KindIcon inherits Text {
@@ -13,7 +14,7 @@ component KindIcon inherits Text {
     font-size: 14px;
     horizontal-alignment: center;
     vertical-alignment: center;
-    text: kind == "link" ? "\u{E71B}" : kind == "code" ? "\u{E943}" : "\u{E8C8}";
+    text: kind == "link" ? "\u{E71B}" : kind == "code" ? "\u{E943}" : kind == "image" ? "\u{E91B}" : "\u{E8C8}";
 }
 
 export component AppWindow inherits Window {
@@ -29,20 +30,33 @@ export component AppWindow inherits Window {
     in property <[ClipRow]> rows;
     in property <string> footer;
     in property <string> stats;
+    // Prévia da imagem selecionada; vazia quando o item é texto.
+    in property <image> preview;
     in-out property <int> selected: 0;
 
     callback query-edited(string);
     callback activate(int, bool);
+    callback selection-changed();
     callback dismiss();
     callback quit();
 
+    changed selected => {
+        root.selection-changed();
+    }
+
     property <length> row-h: 30px;
+    property <length> card-h: 164px;
+    property <bool> has-preview: root.preview.width > 0;
+    // Topo da linha selecionada dentro da área visível da lista.
+    property <length> selected-top: root.selected * root.row-h + list.content-y;
     property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     property <color> accent: dark ? #8ca9ff : #2e63ff;
     property <color> link-color: dark ? #5fd4bf : #0f7b6c;
     property <color> muted: dark ? #c5c5c5 : #5c5c5c;
     property <color> selected-bg: dark ? #ffffff14 : #0f172a10;
     property <color> hover-bg: dark ? #ffffff0c : #0f172a0a;
+    property <color> card-bg: dark ? #2b2b2b : #ffffff;
+    property <color> thumb-border: dark ? #ffffff24 : #0f172a1f;
 
     public function open() {
         search.text = "";
@@ -197,7 +211,26 @@ export component AppWindow inherits Window {
 
                                 KindIcon {
                                     kind: row.kind;
-                                    color: row.kind == "link" ? root.link-color : row.kind == "code" ? root.muted : root.accent;
+                                    color: row.kind == "link" || row.kind == "image" ? root.link-color : row.kind == "code" ? root.muted : root.accent;
+                                }
+
+                                if row.kind == "image": VerticalLayout {
+                                    alignment: center;
+                                    Rectangle {
+                                        width: 36px;
+                                        height: 22px;
+                                        Image {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            source: row.thumb;
+                                            image-fit: fill;
+                                        }
+                                        Rectangle {
+                                            border-width: 1px;
+                                            border-radius: 2px;
+                                            border-color: root.thumb-border;
+                                        }
+                                    }
                                 }
 
                                 Text {
@@ -237,6 +270,28 @@ export component AppWindow inherits Window {
                     color: root.muted;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+
+                // Cartão de prévia: fica embaixo, ou em cima se a linha selecionada estiver lá embaixo.
+                if root.has-preview: Rectangle {
+                    x: 8px;
+                    y: root.selected-top + root.row-h > parent.height - root.card-h - 8px ? 8px : parent.height - root.card-h - 8px;
+                    width: parent.width - 16px;
+                    height: root.card-h;
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    background: root.card-bg;
+
+                    Image {
+                        x: 6px;
+                        y: 6px;
+                        width: parent.width - 12px;
+                        height: parent.height - 12px;
+                        source: root.preview;
+                        // A prévia já vem no tamanho certo; só não deixa ampliar imagens pequenas.
+                        image-fit: preserve;
+                    }
                 }
             }
 

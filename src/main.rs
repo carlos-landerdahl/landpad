@@ -3,6 +3,7 @@
 //! Mede quanto a janela Slint pesa parada na memória e quanto demora para
 //! abrir pelo atalho global. A janela nasce oculta e só aparece no atalho.
 
+mod images;
 mod win;
 
 use std::cell::{Cell, RefCell};
@@ -10,17 +11,44 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
 
 slint::include_modules!();
 
 const MAX_CLIPS: usize = 500;
 const MAX_ROWS: usize = 200;
+/// Miniatura da linha e área da prévia, em pixels lógicos; precisam bater com o app.slint.
+const THUMB_SIZE: (f32, f32) = (36.0, 22.0);
+const PREVIEW_SIZE: (f32, f32) = (372.0, 152.0);
+
+enum Content {
+    Text(String),
+    Image(Picture),
+}
+
+/// Imagem do histórico. O original fica em disco (ver images.rs); aqui só a miniatura.
+struct Picture {
+    hash: u64,
+    width: u32,
+    height: u32,
+    has_png: bool,
+    thumb: slint::Image,
+}
 
 struct Clip {
-    text: String,
+    content: Content,
     app: String,
     copied: Instant,
+}
+
+impl Content {
+    fn same(&self, other: &Content) -> bool {
+        match (self, other) {
+            (Content::Text(a), Content::Text(b)) => a == b,
+            (Content::Image(a), Content::Image(b)) => a.hash == b.hash,
+            _ => false,
+        }
+    }
 }
 
 struct State {
@@ -39,6 +67,8 @@ thread_local! {
     static FRAME_TIMING: Cell<bool> = const { Cell::new(false) };
     static BENCH: Cell<bool> = const { Cell::new(false) };
     static TIMINGS: RefCell<Vec<f64>> = const { RefCell::new(Vec::new()) };
+    /// Hash da imagem cuja prévia está na tela (ou sendo gerada).
+    static PREVIEW_OF: Cell<Option<u64>> = const { Cell::new(None) };
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -46,6 +76,7 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
 }
 
 fn main() -> Result<(), slint::PlatformError> {
+    images::reset();
     let ui = AppWindow::new()?;
     let model = Rc::new(VecModel::<ClipRow>::default());
     ui.set_rows(ModelRc::from(model.clone()));
@@ -65,8 +96,11 @@ fn main() -> Result<(), slint::PlatformError> {
         with_state(|st| {
             st.query = query.to_string();
             refresh(st);
+            update_preview(st);
         })
     });
+
+    ui.on_selection_changed(|| with_state(update_preview));
 
     let weak = ui.as_weak();
     ui.on_activate(move |index, _plain| {
@@ -75,13 +109,20 @@ fn main() -> Result<(), slint::PlatformError> {
             let k = *st.shown.get(index as usize)?;
             let mut clip = st.clips.remove(k);
             clip.copied = Instant::now();
-            let text = clip.text.clone();
+            let payload = match &clip.content {
+                Content::Text(text) => Ok(win::Captured::Text(text.clone())),
+                Content::Image(p) => {
+                    images::load(p.hash, p.has_png).map(|(dib, png)| win::Captured::Image { dib, png })
+                }
+            };
             st.clips.insert(0, clip);
-            Some((text, st.target))
+            Some((payload, st.target))
         });
         hide(&ui);
-        if let Some((text, target)) = picked {
-            win::paste(text, target);
+        match picked {
+            Some((Ok(payload), target)) => win::paste(payload, target),
+            Some((Err(e), _)) => eprintln!("[colar] não consegui ler a imagem guardada: {e}"),
+            None => {}
         }
     });
 
@@ -117,8 +158,14 @@ fn main() -> Result<(), slint::PlatformError> {
     let on_hotkey = ui.as_weak();
     let on_foreground = ui.as_weak();
     let hotkey = win::start(win::Handlers {
-        on_clip: Box::new(|text, app| {
-            let _ = slint::invoke_from_event_loop(move || add_clip(text, app));
+        on_clip: Box::new(|captured, app| match captured {
+            win::Captured::Text(text) => {
+                let _ = slint::invoke_from_event_loop(move || add_clip(Content::Text(text), app));
+            }
+            // Miniatura e disco numa thread à parte, para não segurar o atalho global.
+            win::Captured::Image { dib, png } => {
+                std::thread::spawn(move || store_image(dib, png, app));
+            }
         }),
         on_hotkey: Box::new(move |t0, target| {
             let weak = on_hotkey.clone();
@@ -179,6 +226,7 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
         win::prepare_popup(hwnd, !BENCH.with(Cell::get));
     }
     ui.invoke_open();
+    with_state(update_preview);
 
     if !FRAME_TIMING.with(|c| c.get()) {
         if let Some(t0) = OPENED_AT.with(|c| c.take()) {
@@ -189,6 +237,7 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
 
 fn hide(ui: &AppWindow) {
     let _ = ui.hide();
+    clear_preview(ui);
     let (private, working) = win::memory_mb();
     println!("[memória] janela oculta: {private:.1} MB privados · {working:.1} MB working set");
 }
@@ -202,7 +251,7 @@ fn report_open(ui: &AppWindow, ms: f64, how: &str) {
     TIMINGS.with(|t| t.borrow_mut().push(ms));
 }
 
-/// `--bench`: enche o histórico com 300 itens e abre/fecha o popup sozinho,
+/// `--bench`: enche o histórico com 300 textos e 2 imagens e abre/fecha o popup sozinho,
 /// para medir sem depender do atalho. Não rouba o foco do app em uso.
 fn start_bench(ui: &AppWindow) {
     BENCH.with(|c| c.set(true));
@@ -213,7 +262,11 @@ fn start_bench(ui: &AppWindow) {
             2 => format!("SELECT safra, SUM(volume_t)\nFROM fretes\nWHERE id = {i};"),
             _ => format!("Reunião {i}: cotações da semana e janela de coleta"),
         };
-        add_clip(text, "bench".into());
+        add_clip(Content::Text(text), "bench".into());
+    }
+    for (seed, (w, h)) in [(1920, 1080), (1280, 960)].into_iter().enumerate() {
+        let dib = sample_dib(w, h, seed as u32);
+        std::thread::spawn(move || store_image(dib, None, "bench".into()));
     }
 
     let weak = ui.as_weak();
@@ -237,6 +290,26 @@ fn start_bench(ui: &AppWindow) {
         print_bench_summary();
         let _ = slint::quit_event_loop();
     });
+}
+
+/// Imagem de teste do `--bench`: um degradê azul → teal com faixas diagonais.
+fn sample_dib(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let mut dib = Vec::with_capacity(40 + (width * height * 4) as usize);
+    dib.extend_from_slice(&40u32.to_le_bytes());
+    dib.extend_from_slice(&(width as i32).to_le_bytes());
+    dib.extend_from_slice(&(height as i32).to_le_bytes());
+    dib.extend_from_slice(&1u16.to_le_bytes());
+    dib.extend_from_slice(&32u16.to_le_bytes());
+    dib.extend_from_slice(&[0; 24]);
+    for y in 0..height {
+        for x in 0..width {
+            let t = x as f32 / width as f32;
+            let band = if ((x + y + seed * 90) / 90) % 2 == 0 { 1.0 } else { 0.82 };
+            let mix = |a: f32, b: f32| ((a + (b - a) * t) * band) as u8;
+            dib.extend_from_slice(&[mix(255.0, 180.0), mix(99.0, 205.0), mix(46.0, 46.0), 255]);
+        }
+    }
+    dib
 }
 
 /// Salva o popup como BMP de 32 bits, para conferir o visual sem olhar a tela.
@@ -291,13 +364,49 @@ fn print_bench_summary() {
     println!("[bench] memória final, janela oculta: {private:.1} MB privados · {working:.1} MB working set");
 }
 
-fn add_clip(text: String, app: String) {
+/// Roda fora da thread da interface: grava a imagem em disco e manda só a miniatura.
+fn store_image(dib: Vec<u8>, png: Option<Vec<u8>>, app: String) {
+    let t0 = Instant::now();
+    let Some(info) = win::dib_info(&dib) else { return };
+    let s = win::scale();
+    let Some(thumb) = win::scale_dib(&dib, (THUMB_SIZE.0 * s).round() as u32, (THUMB_SIZE.1 * s).round() as u32, true)
+    else {
+        eprintln!("[imagem] não consegui gerar a miniatura");
+        return;
+    };
+    let hash = images::hash(&dib);
+    if let Err(e) = images::save(hash, &dib, info.bits_offset, png.as_deref()) {
+        eprintln!("[imagem] não consegui guardar em {}: {e}", images::dir().display());
+        return;
+    }
+    let has_png = png.is_some();
+    println!(
+        "[imagem] {} × {} de {app}{} guardada em {:.0} ms",
+        info.width,
+        info.height,
+        if has_png { ", com PNG," } else { "" },
+        elapsed_ms(t0)
+    );
+    let (width, height) = (info.width, info.height);
+    let _ = slint::invoke_from_event_loop(move || {
+        let picture = Picture { hash, width, height, has_png, thumb: image_from(&thumb) };
+        add_clip(Content::Image(picture), app);
+    });
+}
+
+fn add_clip(content: Content, app: String) {
     with_state(|st| {
-        if let Some(pos) = st.clips.iter().position(|c| c.text == text) {
+        if let Some(pos) = st.clips.iter().position(|c| c.content.same(&content)) {
             st.clips.remove(pos);
         }
-        st.clips.insert(0, Clip { text, app, copied: Instant::now() });
-        st.clips.truncate(MAX_CLIPS);
+        st.clips.insert(0, Clip { content, app, copied: Instant::now() });
+        if st.clips.len() > MAX_CLIPS {
+            for old in st.clips.drain(MAX_CLIPS..) {
+                if let Content::Image(p) = old.content {
+                    images::remove(p.hash);
+                }
+            }
+        }
         refresh(st);
     });
 }
@@ -308,7 +417,13 @@ fn refresh(st: &mut State) {
         .clips
         .iter()
         .enumerate()
-        .filter(|(_, c)| query.is_empty() || fold(&c.text).contains(&query) || fold(&c.app).contains(&query))
+        .filter(|(_, c)| {
+            let haystack = match &c.content {
+                Content::Text(text) => fold(text),
+                Content::Image(p) => fold(&image_label(p)),
+            };
+            query.is_empty() || haystack.contains(&query) || fold(&c.app).contains(&query)
+        })
         .map(|(i, _)| i)
         .take(MAX_ROWS)
         .collect();
@@ -319,10 +434,15 @@ fn refresh(st: &mut State) {
         .iter()
         .map(|&i| {
             let clip = &st.clips[i];
+            let (text, kind, thumb) = match &clip.content {
+                Content::Text(text) => (preview(text), kind_of(text), slint::Image::default()),
+                Content::Image(p) => (image_label(p), "image", p.thumb.clone()),
+            };
             ClipRow {
-                text: preview(&clip.text).into(),
+                text: text.into(),
                 meta: format!("{} · {}", clip.app, ago(now.duration_since(clip.copied))).into(),
-                kind: kind_of(&clip.text).into(),
+                kind: kind.into(),
+                thumb,
             }
         })
         .collect();
@@ -337,6 +457,59 @@ fn refresh(st: &mut State) {
         };
         ui.set_footer(footer.into());
     }
+}
+
+/// Prévia grande da imagem selecionada, lida do disco numa thread à parte.
+/// Enquanto a nova não chega, a anterior continua na tela, para não piscar.
+fn update_preview(st: &mut State) {
+    let Some(ui) = st.ui.upgrade() else { return };
+    let picture = usize::try_from(ui.get_selected())
+        .ok()
+        .and_then(|i| st.shown.get(i))
+        .and_then(|&k| match &st.clips[k].content {
+            Content::Image(p) => Some(p),
+            Content::Text(_) => None,
+        });
+    let Some(picture) = picture else {
+        clear_preview(&ui);
+        return;
+    };
+    let hash = picture.hash;
+    if PREVIEW_OF.with(|c| c.replace(Some(hash))) == Some(hash) {
+        return;
+    }
+    let weak = st.ui.clone();
+    std::thread::spawn(move || {
+        let s = win::scale();
+        let (w, h) = ((PREVIEW_SIZE.0 * s) as u32, (PREVIEW_SIZE.1 * s) as u32);
+        let Some(pixels) = images::load(hash, false).ok().and_then(|(dib, _)| win::scale_dib(&dib, w, h, false))
+        else {
+            return;
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            // Se o usuário já foi para outro item, essa prévia não serve mais.
+            if PREVIEW_OF.with(Cell::get) != Some(hash) {
+                return;
+            }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_preview(image_from(&pixels));
+            }
+        });
+    });
+}
+
+fn clear_preview(ui: &AppWindow) {
+    PREVIEW_OF.with(|c| c.set(None));
+    ui.set_preview(slint::Image::default());
+}
+
+fn image_from(pixels: &win::Pixels) -> slint::Image {
+    let buffer = SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(&pixels.rgba, pixels.width, pixels.height);
+    slint::Image::from_rgba8(buffer)
+}
+
+fn image_label(p: &Picture) -> String {
+    format!("Imagem {} × {}", p.width, p.height)
 }
 
 fn hwnd_of(ui: &AppWindow) -> Option<isize> {
