@@ -1,0 +1,45 @@
+[package]
+name = "landpad"
+version = "0.0.1"
+edition = "2021"
+description = "Landpad, gerenciador de clipboard para Windows — spike da Fase 0"
+publish = false
+
+[dependencies]
+raw-window-handle = "0.6"
+# Só o renderizador por software: no spike ele ficou em ~8 MB privados contra ~130 MB do OpenGL.
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-software",
+    "software-renderer-systemfonts",
+    "software-renderer-path",
+    "accessibility",
+    "compat-1-2",
+    "raw-window-handle-06",
+] }
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "1"
+
+[profile.release]
+# "z" tirou 2 MB do executável sem mudar o tempo de abertura medido no spike.
+opt-level = "z"
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

@@ -1,0 +1,283 @@
+import { LineEdit, ListView, Palette } from "std-widgets.slint";
+
+export struct ClipRow {
+    text: string,
+    meta: string,
+    kind: string,
+}
+
+component KindIcon inherits Text {
+    in property <string> kind;
+    width: 16px;
+    font-family: "Segoe Fluent Icons";
+    font-size: 14px;
+    horizontal-alignment: center;
+    vertical-alignment: center;
+    text: kind == "link" ? "\u{E71B}" : kind == "code" ? "\u{E943}" : "\u{E8C8}";
+}
+
+export component AppWindow inherits Window {
+    title: "Landpad";
+    no-frame: true;
+    always-on-top: true;
+    width: 400px;
+    height: 440px;
+    background: Palette.background;
+    default-font-family: "Segoe UI Variable Text";
+    default-font-size: 13px;
+
+    in property <[ClipRow]> rows;
+    in property <string> footer;
+    in property <string> stats;
+    in-out property <int> selected: 0;
+
+    callback query-edited(string);
+    callback activate(int, bool);
+    callback dismiss();
+    callback quit();
+
+    property <length> row-h: 30px;
+    property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    property <color> accent: dark ? #8ca9ff : #2e63ff;
+    property <color> link-color: dark ? #5fd4bf : #0f7b6c;
+    property <color> muted: dark ? #c5c5c5 : #5c5c5c;
+    property <color> selected-bg: dark ? #ffffff14 : #0f172a10;
+    property <color> hover-bg: dark ? #ffffff0c : #0f172a0a;
+
+    public function open() {
+        search.text = "";
+        root.selected = 0;
+        list.content-y = 0;
+        search.focus();
+    }
+
+    function move(delta: int) {
+        if (root.rows.length == 0) {
+            return;
+        }
+        root.selected = max(0, min(root.rows.length - 1, root.selected + delta));
+        if (root.selected * root.row-h < -list.content-y) {
+            list.content-y = -root.selected * root.row-h;
+        } else if ((root.selected + 1) * root.row-h > list.visible-height - list.content-y) {
+            list.content-y = list.visible-height - (root.selected + 1) * root.row-h;
+        }
+    }
+
+    forward-focus: search;
+
+    FocusScope {
+        capture-key-pressed(event) => {
+            if (event.text == Key.UpArrow) {
+                root.move(-1);
+                return accept;
+            }
+            if (event.text == Key.DownArrow) {
+                root.move(1);
+                return accept;
+            }
+            if (event.text == Key.PageUp) {
+                root.move(-10);
+                return accept;
+            }
+            if (event.text == Key.PageDown) {
+                root.move(10);
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.activate(root.selected, event.modifiers.shift);
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                if (search.text != "") {
+                    search.text = "";
+                    root.selected = 0;
+                    root.query-edited("");
+                } else {
+                    root.dismiss();
+                }
+                return accept;
+            }
+            if (event.modifiers.control && (event.text == "q" || event.text == "Q")) {
+                root.quit();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalLayout {
+            HorizontalLayout {
+                padding: 8px;
+                padding-left: 10px;
+                spacing: 8px;
+
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 6px;
+                        background: @linear-gradient(135deg, #4a7bff 0%, #1c3fcf 100%);
+                        Path {
+                            width: parent.width;
+                            height: parent.height;
+                            viewbox-width: 64;
+                            viewbox-height: 64;
+                            commands: "M 27 16 L 27 40 L 44 40";
+                            stroke: #2ecdb4;
+                            stroke-width: 3.5px;
+                        }
+                        Path {
+                            width: parent.width;
+                            height: parent.height;
+                            viewbox-width: 64;
+                            viewbox-height: 64;
+                            commands: "M 20 23 L 20 47 L 37 47";
+                            stroke: white;
+                            stroke-width: 3.5px;
+                        }
+                    }
+                }
+
+                search := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "Buscar no histórico";
+                    edited(text) => {
+                        root.selected = 0;
+                        root.query-edited(text);
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+
+                list := ListView {
+                    width: parent.width;
+                    height: parent.height;
+
+                    for row[i] in root.rows: Rectangle {
+                        height: root.row-h;
+
+                        Rectangle {
+                            x: 4px;
+                            y: 1px;
+                            width: parent.width - 8px;
+                            height: parent.height - 2px;
+                            border-radius: 4px;
+                            background: i == root.selected ? root.selected-bg : (touch.has-hover ? root.hover-bg : transparent);
+
+                            Rectangle {
+                                x: 0px;
+                                y: (parent.height - 16px) / 2;
+                                width: 3px;
+                                height: 16px;
+                                border-radius: 1.5px;
+                                background: root.accent;
+                                visible: i == root.selected;
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                spacing: 8px;
+
+                                Text {
+                                    width: 12px;
+                                    text: i < 9 ? "\{i + 1}" : "";
+                                    font-size: 11px;
+                                    color: root.muted;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                KindIcon {
+                                    kind: row.kind;
+                                    color: row.kind == "link" ? root.link-color : row.kind == "code" ? root.muted : root.accent;
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: row.text;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    color: Palette.foreground;
+                                    font-family: row.kind == "code" ? "Cascadia Mono" : "Segoe UI Variable Text";
+                                    font-size: row.kind == "code" ? 12px : 13px;
+                                }
+
+                                Text {
+                                    text: row.meta;
+                                    font-size: 11px;
+                                    color: root.muted;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            touch := TouchArea {
+                                clicked => {
+                                    root.selected = i;
+                                }
+                                double-clicked => {
+                                    root.activate(i, false);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if root.rows.length == 0: Text {
+                    width: parent.width;
+                    height: parent.height;
+                    text: "Nada por aqui ainda. Copie algo com Ctrl+C.";
+                    color: root.muted;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
+            Rectangle {
+                height: 28px;
+                background: Palette.alternate-background;
+
+                HorizontalLayout {
+                    padding-left: 12px;
+                    padding-right: 12px;
+                    spacing: 8px;
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.footer;
+                        overflow: elide;
+                        font-size: 11px;
+                        color: root.muted;
+                        vertical-alignment: center;
+                    }
+
+                    Text {
+                        text: root.stats;
+                        font-size: 11px;
+                        color: root.muted;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-width: 1px;
+        border-color: Palette.border;
+    }
+}
