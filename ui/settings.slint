@@ -182,6 +182,8 @@ export component SettingsWindow inherits Window {
     in-out property <int> page: 0;
 
     in-out property <bool> start-with-windows;
+    // Instalado pela Microsoft Store, quem liga e desliga é o Windows.
+    in property <bool> autostart-managed;
     in-out property <int> theme-index;
     in-out property <int> position-index;
     in property <string> popup-hotkey;
@@ -196,6 +198,8 @@ export component SettingsWindow inherits Window {
     in property <[string]> ignored-apps;
     in-out property <int> max-items;
     in-out property <bool> keep-images;
+    in-out property <bool> check-updates;
+    in property <bool> show-updates: true;
     in property <string> history-status;
 
     // Qualquer preferência mudou: o Rust lê todas, aplica e salva.
@@ -332,9 +336,9 @@ export component SettingsWindow inherits Window {
                     Row {
                         dark: root.dark;
                         title: "Iniciar com o Windows";
-                        description: "Fica na bandeja, sem janela aberta.";
+                        description: root.autostart-managed ? "Na versão da Microsoft Store, isso fica em Configurações do Windows > Aplicativos > Inicialização." : "Fica na bandeja, sem janela aberta.";
                         description-color: root.muted;
-                        VerticalLayout {
+                        if !root.autostart-managed: VerticalLayout {
                             alignment: center;
                             Switch {
                                 checked <=> root.start-with-windows;
@@ -657,7 +661,7 @@ export component SettingsWindow inherits Window {
                             padding: 18px;
                             spacing: 6px;
                             Text {
-                                text: "Feito em Rust, com Slint na interface. Um executável só, sem serviços extras, e nada do que você copia sai do seu computador.";
+                                text: "Feito em Rust, com Slint na interface. Um executável só, sem serviços extras, e nada do que você copia sai do seu computador. Código aberto, licença MIT.";
                                 font-size: 13px;
                                 color: Palette.foreground;
                                 wrap: word-wrap;
@@ -666,6 +670,21 @@ export component SettingsWindow inherits Window {
                                 text: "github.com/carlos-landerdahl/landpad";
                                 font-size: 13px;
                                 color: root.accent;
+                            }
+                        }
+                    }
+                    if root.show-updates: Row {
+                        dark: root.dark;
+                        title: "Avisar sobre versões novas";
+                        description: "Uma vez por dia o Landpad pergunta ao GitHub qual é a versão mais recente. Nada sobre você ou suas cópias é enviado.";
+                        description-color: root.muted;
+                        VerticalLayout {
+                            alignment: center;
+                            Switch {
+                                checked <=> root.check-updates;
+                                toggled => {
+                                    root.edited();
+                                }
                             }
                         }
                     }

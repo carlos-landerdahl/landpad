@@ -6,11 +6,13 @@
 // Sem janela de console ao iniciar com o Windows; aberto de um terminal, os logs vão para ele.
 #![windows_subsystem = "windows"]
 
+mod assets;
 mod config;
 mod images;
 mod logo;
 mod settings;
 mod shot;
+mod update;
 mod win;
 
 use std::cell::{Cell, RefCell};
@@ -100,6 +102,16 @@ fn main() -> Result<(), slint::PlatformError> {
         shot::self_test();
         return Ok(());
     }
+    if flag("--check-update") {
+        update::report();
+        return Ok(());
+    }
+    if let Some(dir) = std::env::args().skip_while(|a| a != "--export-assets").nth(1) {
+        if let Err(e) = assets::export(std::path::Path::new(&dir)) {
+            eprintln!("[assets] {e}");
+        }
+        return Ok(());
+    }
     // Os modos de teste rodam ao lado do app de verdade, com uma pasta de imagens só deles.
     let testing = flag("--bench") || flag("--settings-test") || flag("--memory-test");
     if testing {
@@ -107,9 +119,14 @@ fn main() -> Result<(), slint::PlatformError> {
     } else if !win::first_instance() {
         eprintln!("O Landpad já está aberto: procure o ícone na bandeja.");
         return Ok(());
+    } else if update::install_pending() {
+        // A versão nova baixada ontem é instalada agora, com o histórico ainda vazio;
+        // o instalador abre o Landpad de novo quando terminar.
+        return Ok(());
     }
     // Sobra de uma execução encerrada à força.
     images::clear();
+    let first_run = !config::exists();
     let config = Config::load();
     let ui = AppWindow::new()?;
     ui.set_logo(logo_image(24.0, win::scale()));
@@ -208,19 +225,13 @@ fn main() -> Result<(), slint::PlatformError> {
     });
 
     // Mede do atalho até o primeiro frame pintado, quando o renderizador permite.
-    let weak = ui.as_weak();
     let notifier = ui.window().set_rendering_notifier(move |state, _| {
         if !matches!(state, slint::RenderingState::AfterRendering) {
             return;
         }
         if let Some(t0) = OPENED_AT.with(|c| c.take()) {
             let ms = elapsed_ms(t0);
-            let weak = weak.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = weak.upgrade() {
-                    report_open(&ui, ms, "até o primeiro frame");
-                }
-            });
+            let _ = slint::invoke_from_event_loop(move || report_open(ms, "até o primeiro frame"));
         }
     });
     FRAME_TIMING.with(|c| c.set(notifier.is_ok()));
@@ -273,6 +284,11 @@ fn main() -> Result<(), slint::PlatformError> {
                 let Some(ui) = weak.upgrade() else { return };
                 match command {
                     win::TrayCommand::Open => toggle(&ui, Instant::now(), win::last_app()),
+                    win::TrayCommand::Update => {
+                        if update::apply_now() {
+                            let _ = slint::quit_event_loop();
+                        }
+                    }
                     win::TrayCommand::Shot => start_shot(),
                     win::TrayCommand::Pause => {
                         with_state(|st| {
@@ -311,12 +327,18 @@ fn main() -> Result<(), slint::PlatformError> {
         Ok(keys) => {
             with_state(|st| st.hotkeys = keys);
             report_hotkeys(keys);
+            if first_run && !testing {
+                welcome(keys);
+            }
         }
         Err(e) => eprintln!("Falha ao ligar o Landpad ao Windows: {e}"),
     }
     let (private, working) = win::memory_mb();
     println!("[memória] parado, sem janela: {private:.1} MB privados · {working:.1} MB working set");
 
+    if !testing && !win::is_packaged() {
+        schedule_update_checks();
+    }
     if flag("--bench") {
         start_bench(&ui);
     }
@@ -333,6 +355,32 @@ fn main() -> Result<(), slint::PlatformError> {
     // O histórico vive só enquanto o app está aberto, imagens inclusive.
     images::clear();
     result
+}
+
+/// Dez segundos depois de abrir e depois uma vez por dia, se estiver ligado.
+fn schedule_update_checks() {
+    slint::Timer::single_shot(Duration::from_secs(10), check_for_update);
+    let daily = Box::leak(Box::new(slint::Timer::default()));
+    daily.start(slint::TimerMode::Repeated, Duration::from_secs(24 * 60 * 60), check_for_update);
+}
+
+fn check_for_update() {
+    if with_state(|st| st.config.check_updates) {
+        update::check(win::announce_update);
+    }
+}
+
+/// Na primeira vez, o Landpad abre direto na bandeja: um balão conta onde ele está e os
+/// atalhos. Gravar as preferências marca que a apresentação já foi feita.
+fn welcome(keys: win::Hotkeys) {
+    let label = |k: Option<win::Hotkey>, fallback: &str| k.map_or(fallback.to_string(), |k| k.label());
+    let text = format!(
+        "{} abre o histórico e {} captura a tela. Clique no ícone para abrir agora.",
+        label(keys.popup, "O atalho"),
+        label(keys.shot, "o outro atalho")
+    );
+    win::balloon("O Landpad está aqui", &text, win::TrayCommand::Open);
+    with_state(|st| st.config.save());
 }
 
 fn start_shot() {
@@ -407,7 +455,7 @@ fn toggle(ui: &AppWindow, t0: Instant, target: win::Target) {
 
     if !FRAME_TIMING.with(|c| c.get()) {
         if let Some(t0) = OPENED_AT.with(|c| c.take()) {
-            report_open(ui, elapsed_ms(t0), "até show(); este renderizador não avisa o frame");
+            report_open(elapsed_ms(t0), "até show(); este renderizador não avisa o frame");
         }
     }
 }
@@ -420,12 +468,11 @@ fn hide(ui: &AppWindow) {
     println!("[memória] janela oculta: {private:.1} MB privados · {working:.1} MB working set");
 }
 
-fn report_open(ui: &AppWindow, ms: f64, how: &str) {
+fn report_open(ms: f64, how: &str) {
     let first = FIRST_OPEN.with(|c| c.replace(false));
     let (private, working) = win::memory_mb();
     let label = if first { "1ª abertura" } else { "abertura" };
     println!("[{label}] {ms:.1} ms ({how}) · {private:.1} MB privados · {working:.1} MB working set");
-    ui.set_stats(format!("{} MB · abriu em {:.0} ms", decimal(private), ms).into());
     TIMINGS.with(|t| t.borrow_mut().push(ms));
 }
 
@@ -692,7 +739,7 @@ fn refresh(st: &mut State) {
             let n = st.shown.len();
             format!("{n} {} · Tab mostra todos", if n == 1 { "fixado" } else { "fixados" })
         } else {
-            format!("{total} itens · Ctrl+P fixa · Tab filtra")
+            format!("{total} itens · Enter cola · Ctrl+P fixa · Tab filtra")
         };
         ui.set_footer(footer.into());
     }
@@ -832,6 +879,3 @@ fn elapsed_ms(t0: Instant) -> f64 {
     t0.elapsed().as_secs_f64() * 1000.0
 }
 
-fn decimal(v: f64) -> String {
-    format!("{v:.1}").replace('.', ",")
-}

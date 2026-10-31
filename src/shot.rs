@@ -38,6 +38,7 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 
 const PNG_ENCODER: GUID = GUID::from_u128(0x557cf406_1a04_11d3_9a73_0000f81ef32e);
 const PIXEL_FORMAT_32BPP_RGB: i32 = 0x0002_2009;
+const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026_200A;
 
 /// Cores das anotações, na ordem do botão de cor.
 const COLORS: [(u8, u8, u8); 4] = [(0xE8, 0x41, 0x4B), (0xF5, 0xA6, 0x23), (0x2E, 0x63, 0xFF), (0x3B, 0xB9, 0x81)];
@@ -758,7 +759,7 @@ unsafe fn finish_capture(hwnd: HWND, how: Finish) {
     if let Some((image, on_done)) = done {
         let (w, h) = (image.width, image.height);
         if how == Finish::Save {
-            match save_png(&image, None) {
+            match save_png(&image, None, PIXEL_FORMAT_32BPP_RGB) {
                 Ok(path) => println!("[print] salvo em {}", path.display()),
                 Err(e) => eprintln!("[print] não consegui salvar: {e}"),
             }
@@ -899,7 +900,7 @@ impl Drop for Pen {
 }
 
 /// Salva como PNG; sem caminho, vai para Imagens\Landpad com data e hora no nome.
-unsafe fn save_png(surface: &Surface, path: Option<&Path>) -> Result<PathBuf, String> {
+unsafe fn save_png(surface: &Surface, path: Option<&Path>, format: i32) -> Result<PathBuf, String> {
     let path = match path {
         Some(p) => p.to_path_buf(),
         None => {
@@ -918,7 +919,7 @@ unsafe fn save_png(surface: &Surface, path: Option<&Path>) -> Result<PathBuf, St
         surface.width,
         surface.height,
         surface.width * 4,
-        PIXEL_FORMAT_32BPP_RGB,
+        format,
         Some(px.as_ptr()),
         &mut bitmap,
     );
@@ -932,6 +933,18 @@ unsafe fn save_png(surface: &Surface, path: Option<&Path>) -> Result<PathBuf, St
         return Err(format!("GDI+ não salvou {} (status {})", path.display(), status.0));
     }
     Ok(path)
+}
+
+/// Grava pixels RGBA, com transparência, como PNG. Serve para exportar o ícone.
+pub fn write_png(rgba: &[u8], width: u32, height: u32, path: &Path) -> Result<(), String> {
+    unsafe {
+        let _gdiplus = GdiPlus::start().ok_or("o GDI+ não iniciou")?;
+        let mut surface = Surface::new(width as i32, height as i32).ok_or("não consegui criar a imagem")?;
+        for (dst, src) in surface.pixels_mut().chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+            dst.copy_from_slice(&[src[2], src[1], src[0], src[3]]);
+        }
+        save_png(&surface, Some(path), PIXEL_FORMAT_32BPP_ARGB).map(|_| ())
+    }
 }
 
 fn pictures_dir() -> PathBuf {
@@ -986,7 +999,7 @@ pub fn self_test() {
         o.paint(back.dc);
         for (surface, name) in [(Some(back), "target/shot-overlay.png"), (o.render(sel), "target/shot-result.png")] {
             let Some(surface) = surface else { continue };
-            match save_png(&surface, Some(Path::new(name))) {
+            match save_png(&surface, Some(Path::new(name)), PIXEL_FORMAT_32BPP_RGB) {
                 Ok(path) => println!("[print] {} salvo ({} × {})", path.display(), surface.width, surface.height),
                 Err(e) => eprintln!("[print] {e}"),
             }

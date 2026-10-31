@@ -39,7 +39,6 @@ export component AppWindow inherits Window {
 
     in property <[ClipRow]> rows;
     in property <string> footer;
-    in property <string> stats;
     // Prévia da imagem selecionada; vazia quando o item é texto.
     in property <image> preview;
     in property <image> logo;
@@ -419,13 +418,6 @@ export component AppWindow inherits Window {
                         horizontal-stretch: 1;
                         text: root.footer;
                         overflow: elide;
-                        font-size: 11px;
-                        color: root.muted;
-                        vertical-alignment: center;
-                    }
-
-                    Text {
-                        text: root.stats;
                         font-size: 11px;
                         color: root.muted;
                         vertical-alignment: center;

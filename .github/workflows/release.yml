@@ -1,0 +1,71 @@
+# Publica uma versão quando uma tag vX.Y.Z chega ao GitHub:
+#   git tag v0.1.0 && git push origin v0.1.0
+# A tag precisa bater com a versão do Cargo.toml. A release sai com o instalador, o zip
+# portátil e o SHA-256 de cada um; o Landpad instalado usa o instalador e o .sha256
+# para se atualizar sozinho.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Conferir a versão
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "A tag ${{ github.ref_name }} não bate com a versão $version do Cargo.toml"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Testes
+        run: cargo test --release --locked
+
+      - name: Compilar
+        run: cargo build --release --locked
+
+      - name: Ícones
+        shell: pwsh
+        run: |
+          # O Landpad é um app de janela: sem -Wait o PowerShell não espera ele terminar.
+          Start-Process -Wait -NoNewWindow -FilePath target/release/landpad.exe -ArgumentList '--export-assets', 'target/assets'
+          if (-not (Test-Path target/assets/landpad.ico)) { throw "os ícones não foram gerados" }
+
+      - name: Instalador
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+          & $iscc "/DVersion=$env:VERSION" packaging/landpad.iss
+          if ($LASTEXITCODE -ne 0) { throw "o Inno Setup falhou" }
+
+      - name: Zip portátil e SHA-256
+        shell: pwsh
+        run: |
+          $dir = "Landpad-$env:VERSION-portatil"
+          New-Item -ItemType Directory $dir | Out-Null
+          Copy-Item target/release/landpad.exe "$dir/Landpad.exe"
+          Copy-Item LICENSE "$dir/LICENSE.txt"
+          Compress-Archive $dir "target/installer/$dir.zip"
+          Get-ChildItem target/installer -File | Where-Object Extension -in '.exe', '.zip' | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -Encoding ascii -NoNewline "$($_.FullName).sha256"
+          }
+          Get-ChildItem target/installer
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Landpad ${{ env.VERSION }}
+          generate_release_notes: true
+          files: target/installer/*

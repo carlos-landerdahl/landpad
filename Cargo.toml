@@ -1,8 +1,10 @@
 [package]
 name = "landpad"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
-description = "Landpad, gerenciador de clipboard para Windows — spike da Fase 0"
+description = "Gerenciador de área de transferência leve para Windows, com captura de tela"
+license = "MIT"
+repository = "https://github.com/carlos-landerdahl/landpad"
 publish = false
 
 [dependencies]
@@ -23,8 +25,11 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_GdiPlus",
+    "Win32_Networking_WinHttp",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_DataExchange",

@@ -30,10 +30,11 @@ use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::Shell::{
-    DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP,
-    NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICONDATAW,
-    NOTIFYICON_VERSION_4,
+    DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_INFO,
+    NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT,
+    NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
 };
+use windows::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::logo;
@@ -52,6 +53,10 @@ const WM_TRAY: u32 = WM_APP + 3;
 const WM_TRAY_REFRESH: u32 = WM_APP + 4;
 /// Tirar o ícone da bandeja e encerrar a thread, ao fechar o app.
 const WM_SHUTDOWN: u32 = WM_APP + 5;
+/// Mostrar o balão guardado em BALLOON.
+const WM_TRAY_BALLOON: u32 = WM_APP + 6;
+/// Clique no balão da bandeja (NIN_BALLOONUSERCLICK), que o crate não exporta.
+const NIN_BALLOONUSERCLICK: u32 = WM_USER + 5;
 const TRAY_ID: u32 = 1;
 /// Enter ou espaço no ícone da bandeja (NIN_SELECT | NINF_KEY), que o crate não exporta.
 const NIN_KEYSELECT: u32 = NIN_SELECT | 1;
@@ -94,6 +99,8 @@ pub struct Options {
 #[derive(Clone, Copy)]
 pub enum TrayCommand {
     Open,
+    /// "Atualizar agora" ou "Baixar a versão nova", pelo menu ou pelo balão.
+    Update,
     Shot,
     Pause,
     Settings,
@@ -220,6 +227,12 @@ static IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// Último app em primeiro plano que não é o Landpad nem a barra de tarefas: é para ele que
 /// colamos quando o popup é aberto pela bandeja.
 static LAST_APP: AtomicIsize = AtomicIsize::new(0);
+/// Versão nova anunciada pelo GitHub e se ela já está baixada, pronta para instalar.
+static UPDATE: Mutex<Option<(String, bool)>> = Mutex::new(None);
+/// O balão a mostrar (título, texto) e o que um clique nele faz.
+static BALLOON: Mutex<Option<(String, String, TrayCommand)>> = Mutex::new(None);
+/// O que o clique no último balão mostrado faz.
+static BALLOON_CLICK: Mutex<Option<TrayCommand>> = Mutex::new(None);
 
 thread_local! {
     static HANDLERS: RefCell<Option<Handlers>> = const { RefCell::new(None) };
@@ -423,6 +436,59 @@ unsafe fn tray_update(hwnd: HWND, add: bool) {
     }
 }
 
+/// Balão de aviso do ícone da bandeja (vira notificação no Windows 11).
+unsafe fn tray_balloon(hwnd: HWND, title: &str, text: &str) {
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ID,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..Default::default()
+    };
+    for (dst, src) in nid.szInfoTitle.iter_mut().take(63).zip(title.encode_utf16()) {
+        *dst = src;
+    }
+    for (dst, src) in nid.szInfo.iter_mut().take(255).zip(text.encode_utf16()) {
+        *dst = src;
+    }
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/// Mostra um balão na bandeja; `click` é o que acontece se o usuário clicar nele.
+/// Pode ser chamada de qualquer thread.
+pub fn balloon(title: &str, text: &str, click: TrayCommand) {
+    *BALLOON.lock().unwrap() = Some((title.to_string(), text.to_string(), click));
+    post(WM_TRAY_BALLOON, 0);
+}
+
+/// Guarda a versão nova para o menu da bandeja e avisa com um balão.
+pub fn announce_update(version: &str, ready: bool) {
+    *UPDATE.lock().unwrap() = Some((version.to_string(), ready));
+    if ready {
+        balloon(
+            &format!("Landpad {version} pronto"),
+            "Instala sozinho na próxima vez que o Landpad abrir. Clique para atualizar agora (o histórico atual será apagado).",
+            TrayCommand::Update,
+        );
+    } else {
+        balloon(&format!("Landpad {version} disponível"), "Clique para abrir a página de download.", TrayCommand::Update);
+    }
+}
+
+pub fn open_url(url: &str) {
+    let url: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        ShellExecuteW(None, w!("open"), PCWSTR(url.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
+/// Instalado pela Microsoft Store (MSIX): quem atualiza é a loja.
+pub fn is_packaged() -> bool {
+    let mut len = 0u32;
+    unsafe { GetCurrentPackageFullName(&mut len, None) != APPMODEL_ERROR_NO_PACKAGE }
+}
+
 unsafe fn tray_remove(hwnd: HWND) {
     let nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -466,6 +532,7 @@ const CMD_SHOT: usize = 2;
 const CMD_PAUSE: usize = 3;
 const CMD_SETTINGS: usize = 4;
 const CMD_QUIT: usize = 5;
+const CMD_UPDATE: usize = 6;
 
 unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let Ok(menu) = CreatePopupMenu() else { return };
@@ -483,6 +550,14 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
     let settings = item("Configurações…", None);
     let quit = item("Sair", None);
     let paused = if PAUSED.load(Ordering::Acquire) { MF_CHECKED } else { MF_UNCHECKED };
+    let update = UPDATE.lock().unwrap().as_ref().map(|(version, ready)| {
+        let text = if *ready { format!("Atualizar para a {version} agora") } else { format!("Baixar a versão {version}…") };
+        item(&text, None)
+    });
+    if let Some(update) = &update {
+        let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, PCWSTR(update.as_ptr()));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+    }
     let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, PCWSTR(open.as_ptr()));
     let _ = AppendMenuW(menu, MF_STRING, CMD_SHOT, PCWSTR(shot.as_ptr()));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
@@ -502,6 +577,7 @@ unsafe fn tray_menu(hwnd: HWND, x: i32, y: i32) {
         CMD_PAUSE => TrayCommand::Pause,
         CMD_SETTINGS => TrayCommand::Settings,
         CMD_QUIT => TrayCommand::Quit,
+        CMD_UPDATE => TrayCommand::Update,
         _ => return,
     };
     notify(|h| (h.on_tray)(command));
@@ -527,6 +603,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TRAY => {
             match (lparam.0 & 0xFFFF) as u32 {
                 NIN_SELECT | NIN_KEYSELECT => notify(|h| (h.on_tray)(TrayCommand::Open)),
+                NIN_BALLOONUSERCLICK => {
+                    if let Some(command) = BALLOON_CLICK.lock().unwrap().take() {
+                        notify(|h| (h.on_tray)(command));
+                    }
+                }
                 WM_CONTEXTMENU => {
                     let (x, y) = ((wparam.0 & 0xFFFF) as u16 as i16 as i32, ((wparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32);
                     tray_menu(hwnd, x, y);
@@ -537,6 +618,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TRAY_REFRESH => {
             tray_update(hwnd, false);
+            LRESULT(0)
+        }
+        WM_TRAY_BALLOON => {
+            if let Some((title, text, click)) = BALLOON.lock().unwrap().take() {
+                *BALLOON_CLICK.lock().unwrap() = Some(click);
+                tray_balloon(hwnd, &title, &text);
+            }
             LRESULT(0)
         }
         WM_SETTINGCHANGE if lparam.0 != 0 => {

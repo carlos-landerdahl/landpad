@@ -1,0 +1,19 @@
+# Compila e roda os testes a cada push e pull request, para a main nunca quebrar.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Testes
+        run: cargo test --release --locked
+      - name: Compilar
+        run: cargo build --release --locked

@@ -34,6 +34,8 @@ pub struct Config {
     pub ignored_apps: Vec<String>,
     pub max_items: usize,
     pub keep_images: bool,
+    /// Perguntar ao GitHub, uma vez por dia, se há versão nova.
+    pub check_updates: bool,
 }
 
 impl Default for Config {
@@ -47,6 +49,7 @@ impl Default for Config {
             ignored_apps: Vec::new(),
             max_items: 500,
             keep_images: true,
+            check_updates: true,
         }
     }
 }
@@ -54,6 +57,11 @@ impl Default for Config {
 fn path() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("Landpad").join("config.ini")
+}
+
+/// Sem arquivo de preferências, é a primeira vez que o Landpad abre.
+pub fn exists() -> bool {
+    path().exists()
 }
 
 /// Se os apps do Windows estão no tema escuro (Configurações > Personalização > Cores).
@@ -116,6 +124,7 @@ impl Config {
                     }
                 }
                 "guardar_imagens" => c.keep_images = value != "nao",
+                "procurar_atualizacoes" => c.check_updates = value != "nao",
                 _ => {}
             }
         }
@@ -127,7 +136,8 @@ impl Config {
         let text = format!(
             "# Preferências do Landpad. O app regrava este arquivo a cada mudança.\n\
              tema = {}\nposicao = {}\natalho_historico = {}\natalho_captura = {}\n\
-             colar_por_numero = {}\napps_ignorados = {}\nmax_itens = {}\nguardar_imagens = {}\n",
+             colar_por_numero = {}\napps_ignorados = {}\nmax_itens = {}\nguardar_imagens = {}\n\
+             procurar_atualizacoes = {}\n",
             match self.theme {
                 Theme::System => "sistema",
                 Theme::Light => "claro",
@@ -144,6 +154,7 @@ impl Config {
             self.ignored_apps.join(", "),
             self.max_items,
             yes_no(self.keep_images),
+            yes_no(self.check_updates),
         );
         let path = path();
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, text));

@@ -86,6 +86,7 @@ fn fill(w: &SettingsWindow) {
         let c = &st.config;
         w.set_dark_mode(c.dark());
         w.set_start_with_windows(config::autostart());
+        w.set_autostart_managed(win::is_packaged());
         w.set_theme_index(match c.theme {
             Theme::System => 0,
             Theme::Light => 1,
@@ -102,6 +103,9 @@ fn fill(w: &SettingsWindow) {
         w.set_ignored_apps(ModelRc::new(VecModel::from(apps)));
         w.set_max_items(c.max_items as i32);
         w.set_keep_images(c.keep_images);
+        w.set_check_updates(c.check_updates);
+        // Na versão da Microsoft Store quem atualiza é a loja.
+        w.set_show_updates(!win::is_packaged());
         w.set_history_status(history_status(st).into());
         let (label, status) = hotkey_text(c.popup_hotkey, st.hotkeys.popup);
         w.set_popup_hotkey(label.into());
@@ -140,6 +144,7 @@ fn wire(w: &SettingsWindow) {
             c.quick_paste = w.get_quick_paste();
             c.max_items = (w.get_max_items().max(0) as usize).clamp(MIN_ITEMS, MAX_ITEMS);
             c.keep_images = w.get_keep_images();
+            c.check_updates = w.get_check_updates();
             st.paused = w.get_paused();
             apply_config(st, c);
         });

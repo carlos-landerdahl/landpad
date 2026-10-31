@@ -1,96 +1,59 @@
-# Landpad
+<p align="center"><img src="docs/icon.png" width="96" alt="Ícone do Landpad"></p>
 
-Gerenciador de área de transferência para Windows, na linha do Ditto: guarda o que você copia, busca na hora e cola em qualquer app.
+<h1 align="center">Landpad</h1>
 
-Este é o **spike da Fase 0**: uma versão mínima para medir se a stack (Rust + Slint + Win32) cabe nas metas de leveza antes de construir o resto.
+<p align="center">Histórico da área de transferência e captura de tela para Windows, leve e rápido.</p>
 
-## O que o spike faz
+O Landpad guarda o que você copia, texto e imagens, acha qualquer coisa pela busca e cola de volta em qualquer app. No `PrtSc`, congela a tela para você recortar, anotar e copiar, no estilo do Lightshot.
 
-- Escuta o clipboard sem polling (`AddClipboardFormatListener`) e guarda textos copiados, ignorando cópias marcadas como sensíveis por gerenciadores de senha.
-- Guarda também imagens copiadas (prints, "Copiar imagem" do navegador). O original vai para `%LOCALAPPDATA%\Landpad\imagens` e só uma miniatura fica na memória; o item selecionado mostra uma prévia maior. Enter cola a imagem de volta, com o PNG original quando o app de origem ofereceu. Quando a cópia traz texto e imagem juntos, como células do Excel, vale o texto.
-- `Ctrl+P` (ou o alfinete na linha) fixa um item no topo; fixados não saem do histórico pelo limite de 500. `Tab` (ou o alfinete ao lado da busca) mostra só os fixados.
-- Com o popup aberto, `Ctrl+Shift+1` a `Ctrl+Shift+9` colam direto o item com aquele número. Esses atalhos só ficam registrados enquanto o popup está aberto.
-- O histórico vive só enquanto o app está aberto, por decisão de produto: ao fechar, ele some, fixados e imagens inclusive. Se o app for encerrado à força, as imagens que sobraram são apagadas na próxima abertura.
-- `Ctrl` + `` ` `` (ou `Ctrl+Alt+V`, se o primeiro estiver ocupado) abre o popup perto do cursor.
-- Busca sem acento, ↑ ↓ para navegar, Enter cola no app que estava em foco, Esc limpa a busca ou fecha.
-- Clicar fora fecha o popup. `Ctrl+Q` no popup encerra o app.
-- O rodapé do popup e o console mostram a memória do processo e quanto tempo a janela levou para abrir.
+- **Leve:** cerca de 8 MB de memória e o histórico abre em ~12 ms.
+- **Um app só:** um executável, sem serviços, sem conta e sem nuvem.
+- **Privado:** o histórico fica só na memória. Fechou o Landpad, ele some.
 
-## Captura de tela
+## Instalar
 
-`PrtSc` congela todos os monitores e abre a captura, no estilo do Lightshot. Se outro app já usa o `PrtSc`, o atalho vira `Ctrl+PrtSc`; o terminal mostra qual ficou.
+Baixe o `Landpad-Setup-x.y.z.exe` na página de [Releases](https://github.com/carlos-landerdahl/landpad/releases/latest) e abra. A instalação é por usuário: não pede senha de administrador e põe o Landpad no menu Iniciar. Ele fica no ícone da bandeja, perto do relógio.
 
-- Arraste para selecionar a região. Arrastar dentro dela move a seleção; clicar fora começa outra.
-- Ferramentas na barra ou pelo teclado: seta (`A`), retângulo (`R`), marca-texto (`M`) e borrar (`B`), que pixela a área para esconder dados. O círculo troca a cor e `Ctrl+Z` desfaz.
-- `Enter`, `Ctrl+C` ou duplo clique copiam a captura. `Ctrl+S` também salva um PNG em `Imagens\Landpad`. `Esc` ou o botão direito cancelam.
-- Toda captura copiada entra no histórico do popup.
+Na primeira vez o Windows pode mostrar "O Windows protegeu o computador", porque o executável ainda não tem assinatura digital: clique em **Mais informações** e depois em **Executar assim mesmo**.
 
-Nada da captura fica carregado entre um uso e outro: cada captura roda numa thread própria, que libera a memória ao fechar. Para conferir o desenho sem abrir a captura na tela, `cargo run --release -- --shot-test` desenha sobre uma área de trabalho de mentira e salva `target/shot-overlay.png` e `target/shot-result.png`.
+Também há um zip portátil (`Landpad-x.y.z-portatil.zip`), que roda sem instalar; nesse caso as atualizações não são automáticas.
 
-## Bandeja e configurações
+### Atualizações
 
-O Landpad fica na bandeja do Windows. Um clique no ícone abre o histórico; o botão direito tem captura de tela, pausar a captura, configurações e sair. As configurações também abrem pela engrenagem do popup ou por `Ctrl+,`.
+O Landpad instalado se atualiza sozinho. Uma vez por dia ele pergunta ao GitHub se há versão nova; se houver, baixa em segundo plano, confere o arquivo e instala na próxima vez que abrir, antes de mostrar qualquer coisa. Para não esperar, clique em **Atualizar agora** no aviso ou no menu da bandeja. A checagem não envia nada sobre você nem sobre o que você copia, e pode ser desligada em Configurações > Sobre.
 
-- **Geral:** iniciar com o Windows (entrada em `HKCU\...\Run`), tema (seguir o Windows, claro ou escuro) e onde o histórico abre (cursor de texto, mouse ou centro da tela).
-- **Atalhos:** "Alterar" grava a próxima combinação apertada; se outro app já usa, a tela avisa. Dá para ligar e desligar o `Ctrl+Shift+1..9`.
-- **Privacidade:** pausar a captura e uma lista de apps cujas cópias nunca entram no histórico.
-- **Histórico:** limite de itens, guardar imagens ou não e limpar (os fixados ficam).
+## Usar
 
-As preferências ficam em `%APPDATA%\Landpad\config.ini` e são salvas a cada mudança. O histórico continua só na memória.
-
-O executável não abre janela de console. Aberto de um terminal, ele usa o console do terminal para os logs. Só pode haver um Landpad aberto por vez; os modos de teste rodam ao lado dele.
-
-Para conferir a tela sem clicar em nada, `cargo run --release -- --settings-test` abre as configurações fora da tela, fotografa cada página em `target/settings-N.bmp` e fecha.
-
-Os modos de teste (`--bench`, `--settings-test`, `--memory-test`) podem rodar com o Landpad aberto: usam uma pasta de imagens própria (`imagens-teste`) e não disputam atalhos nem a bandeja.
-
-## Memória com tudo ligado (31/10/2026)
-
-`cargo run --release -- --memory-test` abre e fecha o popup, abre e fecha as configurações 5 vezes passando por todas as páginas e faz 5 capturas de tela (o caminho inteiro, sem janela e sobre uma área de trabalho de mentira do tamanho da tela), cada uma seguida do popup com a prévia da imagem.
-
-| Situação | Memória privada |
+| Atalho | O que faz |
 |---|---|
-| Parado | 6,0 MB |
-| Depois do popup | 7,7 MB |
-| Configurações abertas | 10,3 MB, igual nas 5 vezes |
-| Configurações fechadas | 8,5 MB, igual nas 5 vezes |
-| Depois das 5 capturas | 9,1 MB, igual nas 5 vezes |
+| `` Ctrl+` `` | Abre o histórico perto do cursor de texto |
+| `PrtSc` | Captura de tela |
 
-Não há vazamento: cada coisa custa uma vez (fontes, glifos e estilos que o Slint guarda) e o número não cresce com o uso. Durante uma captura o app usa mais (três cópias da tela, cerca de 50 MB com dois monitores Full HD), e devolve tudo ao fechar.
+**No histórico:** digite para buscar (acentos não importam), use ↑ ↓ e `Enter` para colar no app em que você estava. `Ctrl+P` fixa um item no topo e `Tab` mostra só os fixados. `Ctrl+Shift+1` a `9` colam direto pelo número. `Esc` fecha, e `Ctrl+,` abre as configurações.
 
-## Rodar
+**Na captura:** arraste para selecionar. Na barra embaixo da seleção ficam seta (`A`), retângulo (`R`), marca-texto (`M`) e borrar (`B`), que pixela dados que não devem aparecer; o círculo troca a cor e `Ctrl+Z` desfaz. `Enter` copia, `Ctrl+S` também salva um PNG em `Imagens\Landpad`, e `Esc` cancela. Toda captura entra no histórico.
+
+**Na bandeja:** um clique abre o histórico. O botão direito tem captura de tela, pausar a captura, configurações e sair.
+
+Os atalhos, o tema, onde o histórico abre, iniciar com o Windows e o limite de itens se mudam nas configurações.
+
+## Privacidade
+
+- Nada do que você copia sai do computador. A única conexão é a checagem de versão nova no GitHub, que dá para desligar.
+- Cópias de gerenciadores de senha (que avisam o Windows que a cópia é sensível) nunca entram no histórico, e você pode listar outros apps para ignorar.
+- O histórico fica na memória. Imagens copiadas ficam em `%LOCALAPPDATA%\Landpad\imagens` só enquanto o Landpad está aberto.
+- As preferências ficam em `%APPDATA%\Landpad\config.ini`.
+
+## Compilar
+
+Precisa do Rust estável e do Build Tools do Visual Studio com C++ e o Windows SDK.
 
 ```bash
 cargo run --release
 ```
 
-## Medir
+Testes, medições e como publicar uma versão estão em [docs/desenvolvimento.md](docs/desenvolvimento.md).
 
-Cada abertura imprime no console a memória do processo e quanto a janela levou para abrir.
+## Licença
 
-Para medir sem apertar o atalho, o modo `--bench` enche o histórico com 300 itens, abre e fecha o popup 10 vezes sem roubar o foco, salva um print em `target/popup.bmp` e encerra:
-
-```bash
-cargo run --release -- --bench
-```
-
-## Resultado do spike (30/10/2026)
-
-Build release, 300 itens no histórico, medido com `--bench`:
-
-| | Renderizador por software | OpenGL (femtovg) |
-|---|---|---|
-| Memória privada parado | 5,9 MB | 49 MB |
-| Memória privada depois de abrir | 7–10 MB | 132 MB |
-| Abertura (mediana, sem contar a 1ª) | 11,5 ms¹ | 14,7 ms |
-| 1ª abertura | 35–47 ms¹ | 45 ms |
-
-¹ No software, medido até `show()`: esse renderizador não avisa quando o frame é pintado.
-
-| Meta | Alvo | Resultado |
-|---|---|---|
-| Memória privada parado | < 15 MB | Passou: 6–10 MB |
-| Abrir o popup | < 50 ms | Passou: ~12 ms |
-| Executável | < 5 MB | Não passou: 7,3 MB com `opt-level = "z"` |
-
-Decisão: seguir com Rust + Slint usando só o renderizador por software, que já é o único compilado. O tamanho do executável fica para investigar com `cargo bloat` na Fase 1.
+[MIT](LICENSE) © Carlos Landerdahl
